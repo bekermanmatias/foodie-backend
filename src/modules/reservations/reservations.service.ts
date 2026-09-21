@@ -961,9 +961,9 @@ export class ReservationsService {
 
   async cancelManual(user: RequestUser, reservationId: string, input: { reason?: string }) {
     const restaurantId = this.restaurantScope(user);
-    const allowedRoles = new Set(["restaurant_owner", "restaurant_manager"]);
+    const allowedRoles = new Set(["restaurant_owner", "restaurant_manager", "host", "events"]);
     if (!allowedRoles.has(String(user.role))) {
-      throw new ForbiddenException("Solo el dueño o gerente puede cancelar reservas");
+      throw new ForbiddenException("No tenés permiso para cancelar reservas");
     }
 
     const cancelled = await this.prisma.$transaction(async (tx) => {

@@ -158,7 +158,7 @@ export class ReservationsController {
   }
 
   @Post("restaurant/reservations/:reservationId/cancel")
-  @Roles("restaurant_owner", "restaurant_manager", "events")
+  @Roles("restaurant_owner", "restaurant_manager", "host", "events")
   cancel(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) {
     return this.reservationsService.cancelManual(user, reservationId, cancellationSchema.parse(body || {}));
   }
