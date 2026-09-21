@@ -164,7 +164,7 @@ export class ReservationsController {
   }
 
   @Post("restaurant/reservations/:reservationId/reschedule")
-  @Roles("restaurant_owner", "restaurant_manager", "events")
+  @Roles("restaurant_owner", "restaurant_manager", "host", "events")
   reschedule(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) {
     return this.reservationsService.reschedule(user, reservationId, rescheduleSchema.parse(body));
   }
