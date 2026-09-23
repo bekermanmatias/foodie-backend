@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from "@nestjs/common";
 import { FloorPlansService } from "./floor-plans.service";
 import { Roles } from "../../common/auth/roles.decorator";
 import { CurrentUser } from "../../common/auth/current-user.decorator";
@@ -93,6 +93,14 @@ const layoutImpactSchema = layoutSchema.extend({
   focusTableId: z.string().min(1).optional()
 });
 
+function parseLayout<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
+  const result = schema.safeParse(body);
+  if (!result.success) {
+    throw new BadRequestException("El plano contiene datos incompletos o inválidos. Revisá las mesas y volvé a intentar.");
+  }
+  return result.data;
+}
+
 @Controller("restaurant/rooms")
 export class FloorPlansController {
   constructor(private readonly floorPlansService: FloorPlansService) {}
@@ -182,7 +190,7 @@ export class FloorPlansController {
     @Body() body: unknown,
     @CurrentUser() user: RequestUser
   ) {
-    const { focusTableId, ...layout } = layoutImpactSchema.parse(body);
+    const { focusTableId, ...layout } = parseLayout(layoutImpactSchema, body);
     return this.floorPlansService.layoutImpact(user, roomId, layout, focusTableId);
   }
 
@@ -193,6 +201,6 @@ export class FloorPlansController {
     @Body() body: unknown,
     @CurrentUser() user: RequestUser
   ) {
-    return this.floorPlansService.replaceLayout(user, roomId, layoutSchema.parse(body));
+    return this.floorPlansService.replaceLayout(user, roomId, parseLayout(layoutSchema, body));
   }
 }

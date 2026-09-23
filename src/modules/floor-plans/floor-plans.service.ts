@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
-import { ConflictException, ForbiddenException, NotFoundException } from "@nestjs/common";
+import { ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import type { RequestUser } from "../../common/auth/request-user";
 import { RealtimeService } from "../realtime/realtime.service";
@@ -367,6 +367,32 @@ export class FloorPlansService {
     return existingTables.filter((table) => this.tableChangedByLayout(table, incomingById.get(table.id))).map((table) => table.id);
   }
 
+  private validateLayoutInput(input: LayoutInput) {
+    const tableIds = new Set<string>();
+    const labels = new Set<string>();
+    for (const table of input.tables) {
+      if (tableIds.has(table.id)) throw new ConflictException("Hay una mesa repetida en el plano. Revisá las mesas antes de guardar.");
+      tableIds.add(table.id);
+      const label = table.label.trim().toLocaleLowerCase("es");
+      if (labels.has(label)) throw new ConflictException(`El nombre de la mesa ${table.label} está repetido en este salón.`);
+      labels.add(label);
+    }
+
+    const combinationIds = new Set<string>();
+    const combinationPairs = new Set<string>();
+    for (const combination of input.combinations) {
+      if (combinationIds.has(combination.id)) throw new ConflictException("Hay una combinación repetida. Revisá las mesas compatibles.");
+      combinationIds.add(combination.id);
+      if (combination.parentTableId === combination.childTableId) throw new ConflictException("Una mesa no puede combinarse consigo misma.");
+      if (!tableIds.has(combination.parentTableId) || !tableIds.has(combination.childTableId)) {
+        throw new ConflictException("Una combinación incluye una mesa eliminada del plano. Revisá las mesas compatibles.");
+      }
+      const pair = [combination.parentTableId, combination.childTableId].sort().join("|");
+      if (combinationPairs.has(pair)) throw new ConflictException("La combinación entre estas mesas está repetida.");
+      combinationPairs.add(pair);
+    }
+  }
+
   private todayInTimezone(timezone: string) {
     const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
     const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || "";
@@ -391,6 +417,7 @@ export class FloorPlansService {
   }
 
   async layoutImpact(user: RequestUser, roomId: string, input: LayoutInput, focusTableId?: string) {
+    this.validateLayoutInput(input);
     const restaurantId = this.restaurantScope(user);
     const { tables: existingTables, timezone } = await this.layoutTablesOrThrow(restaurantId, roomId);
     const changedTableIds = this.layoutImpactTableIds(existingTables, input);
@@ -398,7 +425,7 @@ export class FloorPlansService {
       throw new NotFoundException("Table not found in this room");
     }
     if (focusTableId && !changedTableIds.includes(focusTableId)) {
-      throw new ConflictException("The selected table is not affected by this layout");
+      throw new ConflictException("La mesa seleccionada no tiene cambios para guardar.");
     }
     const affectedTableIds = focusTableId ? [focusTableId] : changedTableIds;
     if (!affectedTableIds.length) return { affectedTableIds: [], reservations: [], excludedTableIds: [] };
@@ -472,6 +499,7 @@ export class FloorPlansService {
     roomId: string,
     input: LayoutInput
   ) {
+    this.validateLayoutInput(input);
     const restaurantId = this.restaurantScope(user);
 
     const room = await this.prisma.room.findFirst({
@@ -505,7 +533,9 @@ export class FloorPlansService {
       });
     })();
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    let result;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
       const existingTables = await tx.table.findMany({
         where: { restaurantId, roomId },
         select: {
@@ -537,6 +567,16 @@ export class FloorPlansService {
       const deactivatableTableIds = activeTables
         .filter((table) => !incomingTableIds.has(table.id) && table.reservationLinks.length)
         .map((table) => table.id);
+
+      const retainedLabels = new Set(existingTables
+        .filter((table) => !table.isActive || deactivatableTableIds.includes(table.id))
+        .map((table) => table.label));
+      const reusedLabel = input.tables.find((table) =>
+        !existingTables.some((existing) => existing.id === table.id && existing.label === table.label) && retainedLabels.has(table.label)
+      );
+      if (reusedLabel) {
+        throw new ConflictException(`La mesa ${reusedLabel.label} tiene reservas anteriores y su nombre sigue en uso. Elegí otro número para la mesa nueva.`);
+      }
 
       const incomingZoneIds = new Set(input.zones.map((zone) => zone.id));
       const incomingItemIds = new Set(input.items.map((item) => item.id));
@@ -700,7 +740,15 @@ export class FloorPlansService {
           tables: { where: { isActive: true } }
         }
       });
-    });
+      }, { timeout: 30000 });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === "P2002") throw new ConflictException("Hay nombres o combinaciones de mesas repetidos. Revisá el plano y volvé a guardar.");
+        if (error.code === "P2003") throw new ConflictException("Una mesa o zona del plano ya no está disponible. Actualizá el salón y revisá los cambios.");
+        if (error.code === "P2028") throw new ServiceUnavailableException("El plano tardó demasiado en guardarse. Intentá de nuevo.");
+      }
+      throw error;
+    }
 
     await this.bumpAssistantContext(restaurantId);
     this.realtimeService.publish("floor_plan.updated", { restaurantId, roomId });
