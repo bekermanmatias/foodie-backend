@@ -228,9 +228,8 @@ export class GiftCardsService {
     const imageUrl = this.absoluteAsset(order.giftCard.imageUrl);
     if (!imageUrl) throw new ConflictException("La Gift Card no tiene imagen generada");
     const clientId = order.restaurant?.chatPhoneNumberId?.trim() || null;
-    const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL;
-    const webhookToken = process.env.N8N_WEBHOOK_TOKEN;
-    if (!webhookUrl || !webhookToken) throw new ConflictException("El envío por WhatsApp no está configurado");
+    const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL || "https://n8n.pupuia.com/webhook/foodie-gift-card-enviar-v1";
+    const webhookToken = process.env.N8N_WEBHOOK_TOKEN || "07092015Leyla@";
     const caption = `¡Tu Gift Card está lista! Código: ${order.giftCard.displayCode}.`;
     let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
     try {
