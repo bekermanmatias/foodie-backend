@@ -551,8 +551,7 @@ export class FloorPlansService {
           isReservable: true,
           isActive: true,
           zoneId: true,
-          metadata: true,
-          reservationLinks: { select: { id: true }, take: 1 }
+          metadata: true
         }
       });
       const incomingTableIds = new Set(input.tables.map((table) => table.id));
@@ -560,23 +559,13 @@ export class FloorPlansService {
       const affectedTableIds = activeTables
         .filter((table) => this.tableChangedByLayout(table, input.tables.find((next) => next.id === table.id)))
         .map((table) => table.id);
-      await this.assertLayoutReservationsRemainCompatible(tx, restaurantId, roomId, input, affectedTableIds, this.todayInTimezone(room.branch.timezone));
-      const removableTableIds = activeTables
-        .filter((table) => !incomingTableIds.has(table.id) && !table.reservationLinks.length)
+      // Toda mesa que ya no viene en el plano se elimina de verdad (incluidas las que
+      // quedaron inactivas de borrados anteriores), para que su número quede libre.
+      const removableTableIds = existingTables
+        .filter((table) => !incomingTableIds.has(table.id))
         .map((table) => table.id);
-      const deactivatableTableIds = activeTables
-        .filter((table) => !incomingTableIds.has(table.id) && table.reservationLinks.length)
-        .map((table) => table.id);
-
-      const retainedLabels = new Set(existingTables
-        .filter((table) => !table.isActive || deactivatableTableIds.includes(table.id))
-        .map((table) => table.label));
-      const reusedLabel = input.tables.find((table) =>
-        !existingTables.some((existing) => existing.id === table.id && existing.label === table.label) && retainedLabels.has(table.label)
-      );
-      if (reusedLabel) {
-        throw new ConflictException(`La mesa ${reusedLabel.label} tiene reservas anteriores y su nombre sigue en uso. Elegí otro número para la mesa nueva.`);
-      }
+      const checkedTableIds = [...new Set([...affectedTableIds, ...removableTableIds])];
+      await this.assertLayoutReservationsRemainCompatible(tx, restaurantId, roomId, input, checkedTableIds, this.todayInTimezone(room.branch.timezone));
 
       const incomingZoneIds = new Set(input.zones.map((zone) => zone.id));
       const incomingItemIds = new Set(input.items.map((item) => item.id));
@@ -663,13 +652,6 @@ export class FloorPlansService {
             roomId,
             id: { in: removableTableIds }
           }
-        });
-      }
-
-      if (deactivatableTableIds.length) {
-        await tx.table.updateMany({
-          where: { restaurantId, roomId, id: { in: deactivatableTableIds } },
-          data: { isActive: false, isReservable: false }
         });
       }
 

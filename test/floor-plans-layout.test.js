@@ -63,21 +63,34 @@ test("reports invalid or stale combinations as client errors", async () => {
   assert.throws(() => controller.replaceLayout("gallery", { tables: [] }, user), (error) => error.status === 400);
 });
 
-test("explains when a removed table still reserves its old number", async () => {
+test("hard deletes a removed table that had reservations so its number can be reused", async () => {
+  const calls = [];
   const oldTable = { ...table("old-56", "56"), isActive: false, reservationLinks: [{ id: "past-reservation" }] };
+  const tx = {
+    reservation: { findMany: async () => [] },
+    serviceState: { findMany: async () => [] },
+    table: {
+      findMany: async () => [oldTable],
+      deleteMany: async (query) => { calls.push(["deleteTables", query]); },
+      updateMany: async () => { calls.push(["updateTables"]); },
+      upsert: async (query) => { calls.push(["upsertTable", query.where.id, query.create.label]); }
+    },
+    floorPlanItem: { findMany: async () => [], deleteMany: async () => {}, upsert: async () => {} },
+    roomZone: { findMany: async () => [], deleteMany: async () => {}, upsert: async () => {} },
+    tableCombination: { deleteMany: async () => {}, createMany: async () => {} },
+    room: { findUnique: async () => ({ id: "gallery" }) }
+  };
   const prisma = {
     room: { findFirst: async () => ({ id: "gallery", branch: { timezone: "America/Argentina/Buenos_Aires" } }) },
-    $transaction: async (operation) => operation({
-      table: { findMany: async () => [oldTable] },
-      reservation: { findMany: async () => [] },
-      serviceState: { findMany: async () => [] }
-    })
+    $transaction: async (operation) => operation(tx),
+    restaurantCustomization: { upsert: async () => {} }
   };
-  const service = new FloorPlansService(prisma, {});
-  await assert.rejects(
-    service.replaceLayout(user, "gallery", layout([table("new-56", "56")])),
-    (error) => error.status === 409 && error.message.includes("reservas anteriores")
-  );
+  const service = new FloorPlansService(prisma, { publish: () => {} });
+  await service.replaceLayout(user, "gallery", layout([table("new-56", "56")]));
+
+  assert.deepEqual(calls.find(([name]) => name === "deleteTables")[1].where.id.in, ["old-56"]);
+  assert.deepEqual(calls.find(([name]) => name === "upsertTable"), ["upsertTable", "new-56", "56"]);
+  assert.equal(calls.some(([name]) => name === "updateTables"), false);
 });
 
 test("converts database conflicts and slow transactions to actionable responses", async () => {
