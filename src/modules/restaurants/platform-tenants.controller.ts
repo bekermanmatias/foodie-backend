@@ -41,7 +41,8 @@ const updateRestaurantSchema = z
     name: z.string().min(2).optional(),
     slug: z.string().min(2).optional(),
     profileImageUrl: z.string().max(1000).nullable().optional(),
-    isActive: z.boolean().optional()
+    isActive: z.boolean().optional(),
+    chatPhoneNumberId: z.string().max(64).nullable().optional()
   })
   .refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
 const updateBranchSchema = z.object({ name: z.string().min(2) });

@@ -216,7 +216,13 @@ export class RestaurantsService {
 
   async updateRestaurant(
     restaurantId: string,
-    input: { name?: string; slug?: string; profileImageUrl?: string | null; isActive?: boolean },
+    input: {
+      name?: string;
+      slug?: string;
+      profileImageUrl?: string | null;
+      isActive?: boolean;
+      chatPhoneNumberId?: string | null;
+    },
     actor: RequestUser
   ) {
     const existing = await this.prisma.restaurant.findUnique({ where: { id: restaurantId } });
@@ -231,7 +237,14 @@ export class RestaurantsService {
 
     const updated = await this.prisma.restaurant.update({
       where: { id: restaurantId },
-      data: { name, slug, profileImageUrl: input.profileImageUrl, isActive: input.isActive }
+      data: {
+        name,
+        slug,
+        profileImageUrl: input.profileImageUrl,
+        isActive: input.isActive,
+        chatPhoneNumberId:
+          input.chatPhoneNumberId === undefined ? undefined : input.chatPhoneNumberId?.trim() || null
+      }
     });
 
     await this.auditService.log({
