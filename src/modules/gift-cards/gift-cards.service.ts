@@ -227,8 +227,7 @@ export class GiftCardsService {
     if (order.giftCard.status !== GiftCardStatus.ACTIVE) throw new ConflictException("La Gift Card no está activa");
     const imageUrl = this.absoluteAsset(order.giftCard.imageUrl);
     if (!imageUrl) throw new ConflictException("La Gift Card no tiene imagen generada");
-    const clientId = order.restaurant?.chatPhoneNumberId?.trim();
-    if (!clientId) throw new ConflictException("El restaurante no tiene configurado el número de WhatsApp");
+    const clientId = order.restaurant?.chatPhoneNumberId?.trim() || null;
     const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL;
     const webhookToken = process.env.N8N_WEBHOOK_TOKEN;
     if (!webhookUrl || !webhookToken) throw new ConflictException("El envío por WhatsApp no está configurado");
