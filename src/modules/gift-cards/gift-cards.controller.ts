@@ -27,7 +27,7 @@ function parseOrder(body: unknown) {
 export class GiftCardsController {
   constructor(private readonly service: GiftCardsService) {}
 
-  @Roles("restaurant_owner")
+  @Roles("restaurant_owner", "host", "events")
   @Get("restaurant/gift-cards/products") products(@CurrentUser() user: RequestUser) { return this.service.listProducts(user); }
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/products") createProduct(@CurrentUser() user: RequestUser, @Body() body: unknown) { return this.service.saveProduct(user, undefined, productSchema.parse(body)); }
@@ -37,7 +37,7 @@ export class GiftCardsController {
   @Delete("restaurant/gift-cards/products/:id") deleteProduct(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.deleteProduct(user, id); }
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/products/preview") previewProduct(@CurrentUser() user: RequestUser, @Body() body: unknown) { return this.service.previewProduct(user, productSchema.parse(body)); }
-  @Roles("restaurant_owner")
+  @Roles("restaurant_owner", "host", "events")
   @Get("restaurant/gift-cards/orders") orders(@CurrentUser() user: RequestUser, @Query("from") from?: string, @Query("to") to?: string, @Query("productId") productId?: string, @Query("status") status?: string, @Query("paymentStatus") paymentStatus?: string, @Query("giftCardStatus") giftCardStatus?: string, @Query("search") search?: string, @Query("page") page?: string, @Query("pageSize") pageSize?: string) { return this.service.listOrders(user, { from, to, productId, status, paymentStatus, giftCardStatus, search, page, pageSize }); }
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/orders/:id/payment") payment(@CurrentUser() user: RequestUser, @Param("id") id: string, @Body() body: { approved?: boolean; reference?: string }) { return this.service.confirmPayment(user, id, body.approved === true, body.reference); }
@@ -47,7 +47,7 @@ export class GiftCardsController {
   @Post("restaurant/gift-cards/orders/:id/cancel") cancel(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.cancelOrder(user, id); }
   @Roles("restaurant_owner")
   @Delete("restaurant/gift-cards/orders/:id") delete(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.deleteOrder(user, id); }
-  @Roles("restaurant_owner")
+  @Roles("restaurant_owner", "host", "events")
   @Post("restaurant/gift-cards/redeem") redeem(@CurrentUser() user: RequestUser, @Body() body: { code?: string; notes?: string; reservationId?: string }) { return this.service.redeem(user, body); }
 
   @Public()
