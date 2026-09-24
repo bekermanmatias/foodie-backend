@@ -1,0 +1,2 @@
+ALTER TABLE "GiftCardOrder" ADD COLUMN "sentAt" TIMESTAMP(3);
+ALTER TABLE "GiftCardOrder" ADD COLUMN "sentBy" TEXT;

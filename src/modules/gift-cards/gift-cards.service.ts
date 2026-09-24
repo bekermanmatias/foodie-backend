@@ -177,10 +177,12 @@ export class GiftCardsService {
       this.prisma.giftCardOrder.count({ where }),
       this.prisma.giftCardOrder.findMany({ where, include: { product: true, giftCard: true }, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
     ]);
-    return { items: orders.map((order) => ({ id: order.id, purchaserName: order.purchaserName, purchaserPhone: order.purchaserPhone, recipientName: order.recipientName, message: order.message, type: order.type, partySize: order.partySize, amount: money(order.amount), currency: order.currency, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, status: order.status, paymentReference: order.paymentReference, paymentConfirmedAt: order.paymentConfirmedAt, createdAt: order.createdAt, product: order.product ? this.productView(order.product) : null, giftCard: order.giftCard ? this.giftCardView(order.giftCard) : null })), total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    return { items: orders.map((order) => ({ id: order.id, purchaserName: order.purchaserName, purchaserPhone: order.purchaserPhone, recipientName: order.recipientName, message: order.message, type: order.type, partySize: order.partySize, amount: money(order.amount), currency: order.currency, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, status: order.status, paymentReference: order.paymentReference, paymentConfirmedAt: order.paymentConfirmedAt, sentAt: order.sentAt, createdAt: order.createdAt, product: order.product ? this.productView(order.product) : null, giftCard: order.giftCard ? this.giftCardView(order.giftCard) : null })), total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }
 
-  private giftCardView(card: any) { const asset = (value: string | null) => value ? (value.startsWith("http") ? value : `${process.env.PUBLIC_API_ORIGIN || "http://localhost:4000"}${value}`) : null; return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: asset(card.imageUrl), pdfUrl: asset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt }; }
+  private absoluteAsset(value: string | null | undefined) { if (!value) return null; return value.startsWith("http") ? value : `${process.env.PUBLIC_API_ORIGIN || "http://localhost:4000"}${value}`; }
+
+  private giftCardView(card: any) { return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: this.absoluteAsset(card.imageUrl), pdfUrl: this.absoluteAsset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt }; }
 
   async createExternal(apiKey: string, input: OrderInput, idempotencyKey?: string) {
     const restaurantId = await this.externalRestaurant(apiKey);
@@ -215,6 +217,39 @@ export class GiftCardsService {
     });
     await this.audit.log({ action: "gift_card.issued", targetType: "gift_card", targetId: result.id, restaurantId, restaurantUserId: user.sub, metadata: { orderId: order.id } });
     return { order: order.id, giftCard: this.giftCardView(result) };
+  }
+
+  async sendGiftCard(user: RequestUser, orderId: string) {
+    const restaurantId = this.owner(user);
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCard: true, restaurant: { select: { chatPhoneNumberId: true } } } });
+    if (!order) throw new NotFoundException("Gift Card order not found");
+    if (!order.giftCard) throw new ConflictException("La Gift Card todavía no está emitida");
+    if (order.giftCard.status !== GiftCardStatus.ACTIVE) throw new ConflictException("La Gift Card no está activa");
+    const imageUrl = this.absoluteAsset(order.giftCard.imageUrl);
+    if (!imageUrl) throw new ConflictException("La Gift Card no tiene imagen generada");
+    const clientId = order.restaurant?.chatPhoneNumberId?.trim();
+    if (!clientId) throw new ConflictException("El restaurante no tiene configurado el número de WhatsApp");
+    const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL;
+    const webhookToken = process.env.N8N_WEBHOOK_TOKEN;
+    if (!webhookUrl || !webhookToken) throw new ConflictException("El envío por WhatsApp no está configurado");
+    const caption = `¡Tu Gift Card está lista! Código: ${order.giftCard.displayCode}.`;
+    let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
+    try {
+      const response = await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-n8n-token": webhookToken }, body: JSON.stringify({ clientId, phoneNumber: order.purchaserPhone, imageUrl, caption, orderId: order.id, restaurantId, code: order.giftCard.displayCode }) });
+      result = (await response.json().catch(() => null)) as { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null;
+      if (!response.ok) throw new Error(`n8n respondió ${response.status}`);
+    } catch (error) {
+      await this.audit.log({ action: "gift_card.send.failed", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { error: error instanceof Error ? error.message : String(error) } });
+      throw new ConflictException("No se pudo contactar el servicio de envío de WhatsApp");
+    }
+    if (!result?.sent) {
+      await this.audit.log({ action: "gift_card.send.blocked", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null } });
+      return { sent: false, reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null };
+    }
+    const sentAt = new Date();
+    await this.prisma.giftCardOrder.update({ where: { id: order.id }, data: { sentAt, sentBy: user.sub } });
+    await this.audit.log({ action: "gift_card.sent", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { channel: "whatsapp", clientId } });
+    return { sent: true, sentAt, reason: null };
   }
 
   async cancelOrder(user: RequestUser, orderId: string) {

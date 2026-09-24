@@ -983,6 +983,8 @@ model GiftCardOrder {
   paymentReference   String?
   paymentConfirmedAt DateTime?
   paymentConfirmedBy String?
+  sentAt             DateTime?
+  sentBy             String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
   restaurant         Restaurant            @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
