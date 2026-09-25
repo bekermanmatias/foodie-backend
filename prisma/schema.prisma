@@ -468,12 +468,13 @@ model OnlineBookingSettings {
   coverImageUrl     String?
   whatsappPhone     String?
   accentColor       String   @default("#FF5A00")
+  publicTheme       String   @default("classic")
   minAdvanceMinutes Int      @default(60)
   maxAdvanceDays    Int      @default(60)
   maximumAdvanceValue Int @default(60)
   maximumAdvanceUnit AdvanceUnit @default(days)
   minPartySize      Int      @default(1)
-  maxPartySize      Int      @default(12)
+  maxPartySize      Int      @default(15)
   largePartyThreshold Int?
   agencyPartyThreshold Int?
   remindersEnabled   Boolean  @default(false)
