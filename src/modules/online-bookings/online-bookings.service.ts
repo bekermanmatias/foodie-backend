@@ -9,6 +9,7 @@ import { ReservationsService } from "../reservations/reservations.service";
 type Schedule = { isEnabled: boolean; startTime: string; endTime: string; intervalMin: number; service?: "lunch" | "dinner"; durationMinutes?: number; turnoverMinutes?: number; label?: string; specialServiceId?: string };
 const requests = new Map<string, number[]>();
 const ARGENTINA_TIMEZONE = "America/Argentina/Buenos_Aires";
+const PUBLIC_BOOKING_INTERVAL_MINUTES = 15;
 
 function serviceDate(date: string) { return new Date(`${date}T00:00:00.000Z`); }
 function weekday(date: string, timezone: string) {
@@ -18,14 +19,16 @@ function weekday(date: string, timezone: string) {
 function timeToMinutes(value: string) { const [hours, minutes] = value.split(":").map(Number); return hours * 60 + minutes; }
 function minutesToTime(value: number) { return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`; }
 
-// Weekly/custom windows describe arrival times. Special services reserve the
-// whole defined turn, so their duration must still fit within that turn.
+// Weekly/custom windows describe arrival times, offered every 15 minutes and
+// including the configured end time. Special services reserve the whole
+// defined turn and keep their configured cadence and duration.
 export function bookingStartTimes(schedule: Schedule, fallbackDurationMinutes: number): string[] {
   const durationMinutes = schedule.durationMinutes || fallbackDurationMinutes;
   const turnoverMinutes = schedule.turnoverMinutes || 0;
   const end = timeToMinutes(schedule.endTime);
+  const intervalMin = schedule.specialServiceId ? schedule.intervalMin : PUBLIC_BOOKING_INTERVAL_MINUTES;
   const times: string[] = [];
-  for (let minute = timeToMinutes(schedule.startTime); schedule.intervalMin > 0 && (schedule.specialServiceId ? minute + durationMinutes + turnoverMinutes <= end : minute < end); minute += schedule.intervalMin) {
+  for (let minute = timeToMinutes(schedule.startTime); intervalMin > 0 && (schedule.specialServiceId ? minute + durationMinutes + turnoverMinutes <= end : minute <= end); minute += intervalMin) {
     times.push(minutesToTime(minute));
   }
   return times;

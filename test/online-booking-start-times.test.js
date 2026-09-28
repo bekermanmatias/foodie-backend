@@ -2,15 +2,16 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { bookingStartTimes, OnlineBookingsService } = require("../dist/modules/online-bookings/online-bookings.service.js");
 
-test("weekly lunch and dinner windows contain arrival slots even when a reservation lasts longer", () => {
+test("weekly lunch and dinner offer slots every 15 minutes, including the configured end", () => {
   const lunch = bookingStartTimes({ isEnabled: true, startTime: "12:00", endTime: "14:30", intervalMin: 10 }, 180);
   const dinner = bookingStartTimes({ isEnabled: true, startTime: "20:00", endTime: "21:30", intervalMin: 10 }, 180);
   assert.equal(lunch[0], "12:00");
-  assert.equal(lunch.at(-1), "14:20");
-  assert.equal(lunch.length, 15);
+  assert.equal(lunch.at(-1), "14:30");
+  assert.equal(lunch.length, 11);
+  assert.ok(lunch.every((time, index) => index === 0 || Number(time.slice(0, 2)) * 60 + Number(time.slice(3)) - (Number(lunch[index - 1].slice(0, 2)) * 60 + Number(lunch[index - 1].slice(3))) === 15));
   assert.equal(dinner[0], "20:00");
-  assert.equal(dinner.at(-1), "21:20");
-  assert.equal(dinner.length, 9);
+  assert.equal(dinner.at(-1), "21:30");
+  assert.equal(dinner.length, 7);
 });
 
 test("special services keep their full reserved duration within each turn", () => {
@@ -50,10 +51,10 @@ test("calendar, availability and creation agree on weekly and special-service st
   assert.ok(calendar.availableDates.includes(specialDate));
   assert.ok(calendar.availableDates.includes(regularDate));
   const regular = await service.availability("estilo-campo", { branch: branch.publicSlug, date: regularDate, partySize: 2, preferredFeatures: [] }, "test-regular");
-  assert.equal(regular.slots.length, 24);
-  assert.ok(regular.slots.some((slot) => slot.time === "14:20"));
+  assert.equal(regular.slots.length, 18);
+  assert.ok(regular.slots.some((slot) => slot.time === "14:30"));
   const special = await service.availability("estilo-campo", { branch: branch.publicSlug, date: specialDate, partySize: 2, preferredFeatures: [] }, "test-special");
   assert.deepEqual(special.slots.map((slot) => slot.time), ["12:00", "14:30"]);
-  const created = await service.createPublicReservation("estilo-campo", { branch: branch.publicSlug, date: regularDate, partySize: 2, time: "14:20", fullName: "Test Guest", phone: "1234567", preferredFeatures: [] }, "test-create");
+  const created = await service.createPublicReservation("estilo-campo", { branch: branch.publicSlug, date: regularDate, partySize: 2, time: "14:30", fullName: "Test Guest", phone: "1234567", preferredFeatures: [] }, "test-create");
   assert.equal(created.code, "ABC123");
 });
