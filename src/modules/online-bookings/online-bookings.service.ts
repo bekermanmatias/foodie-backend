@@ -18,6 +18,19 @@ function weekday(date: string, timezone: string) {
 function timeToMinutes(value: string) { const [hours, minutes] = value.split(":").map(Number); return hours * 60 + minutes; }
 function minutesToTime(value: number) { return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`; }
 
+// Weekly/custom windows describe arrival times. Special services reserve the
+// whole defined turn, so their duration must still fit within that turn.
+export function bookingStartTimes(schedule: Schedule, fallbackDurationMinutes: number): string[] {
+  const durationMinutes = schedule.durationMinutes || fallbackDurationMinutes;
+  const turnoverMinutes = schedule.turnoverMinutes || 0;
+  const end = timeToMinutes(schedule.endTime);
+  const times: string[] = [];
+  for (let minute = timeToMinutes(schedule.startTime); schedule.intervalMin > 0 && (schedule.specialServiceId ? minute + durationMinutes + turnoverMinutes <= end : minute < end); minute += schedule.intervalMin) {
+    times.push(minutesToTime(minute));
+  }
+  return times;
+}
+
 @Injectable()
 export class OnlineBookingsService {
   constructor(private readonly prisma: PrismaService, private readonly reservations: ReservationsService, private readonly audit: AuditService) {}
@@ -177,8 +190,7 @@ export class OnlineBookingsService {
     const schedules = await this.schedulesFor(restaurant.id, branch.id, input.date, ARGENTINA_TIMEZONE);
     if (!schedules.length) return { date: input.date, partySize: input.partySize, slots: [] };
     const slots: Array<{ time: string; available: boolean }> = [];
-    for (const schedule of schedules) for (let minute = timeToMinutes(schedule.startTime); minute + (schedule.durationMinutes || branch.onlineBookingDurationMinutes) + (schedule.turnoverMinutes || 0) <= timeToMinutes(schedule.endTime); minute += schedule.intervalMin) {
-      const time = minutesToTime(minute);
+    for (const schedule of schedules) for (const time of bookingStartTimes(schedule, branch.onlineBookingDurationMinutes)) {
       if (!this.meetsAdvance(input.date, time, await this.minimumAdvance(restaurant.id, input.date, time, ARGENTINA_TIMEZONE, settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) continue;
       const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: restaurant.id, branchId: branch.id, partySize: input.partySize, serviceDate: input.date, serviceTime: time, preferredFeatures: input.preferredFeatures, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 });
       if (available) slots.push({ time, available: true });
@@ -217,8 +229,7 @@ export class OnlineBookingsService {
     for (const schedule of input.schedules) {
       const durationMinutes = schedule.durationMinutes || input.fallbackDurationMinutes;
       const turnoverMinutes = schedule.turnoverMinutes || 0;
-      for (let minute = timeToMinutes(schedule.startTime); minute + durationMinutes + turnoverMinutes <= timeToMinutes(schedule.endTime); minute += schedule.intervalMin) {
-        const time = minutesToTime(minute);
+      for (const time of bookingStartTimes(schedule, input.fallbackDurationMinutes)) {
         if (!this.meetsAdvance(input.date, time, await this.minimumAdvance(input.restaurantId, input.date, time, ARGENTINA_TIMEZONE, input.settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) continue;
         const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: input.restaurantId, branchId: input.branchId, partySize: input.partySize, serviceDate: input.date, serviceTime: time, durationMinutes, turnoverMinutes });
         if (available) return true;
@@ -235,7 +246,7 @@ export class OnlineBookingsService {
     if (input.partySize < settings.minPartySize || input.partySize > settings.maxPartySize) throw new BadRequestException("Party size is outside the allowed range");
     this.validateWindow(input.date, settings, ARGENTINA_TIMEZONE);
     const schedules = await this.schedulesFor(restaurant.id, branch.id, input.date, ARGENTINA_TIMEZONE);
-    const schedule = schedules.find((item) => timeToMinutes(input.time) >= timeToMinutes(item.startTime) && timeToMinutes(input.time) + (item.durationMinutes || branch.onlineBookingDurationMinutes) + (item.turnoverMinutes || 0) <= timeToMinutes(item.endTime) && (timeToMinutes(input.time) - timeToMinutes(item.startTime)) % item.intervalMin === 0);
+    const schedule = schedules.find((item) => bookingStartTimes(item, branch.onlineBookingDurationMinutes).includes(input.time));
     if (!schedule) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
     if (!this.meetsAdvance(input.date, input.time, await this.minimumAdvance(restaurant.id, input.date, input.time, ARGENTINA_TIMEZONE, settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
     const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: restaurant.id, branchId: branch.id, partySize: input.partySize, serviceDate: input.date, serviceTime: input.time, preferredFeatures: input.preferredFeatures, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 });
