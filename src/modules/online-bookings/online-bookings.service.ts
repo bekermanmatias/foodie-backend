@@ -174,7 +174,6 @@ export class OnlineBookingsService {
     if (!branch.isEnabled || !branch.publicBookingEnabled) throw new NotFoundException("Branch not found");
     if (input.partySize < settings.minPartySize || input.partySize > settings.maxPartySize) throw new BadRequestException("Party size is outside the allowed range");
     this.validateWindow(input.date, settings, ARGENTINA_TIMEZONE);
-    if (settings.largePartyThreshold && input.partySize > settings.largePartyThreshold) return { date: input.date, partySize: input.partySize, slots: [], fallbackAction: "whatsapp" };
     const schedules = await this.schedulesFor(restaurant.id, branch.id, input.date, ARGENTINA_TIMEZONE);
     if (!schedules.length) return { date: input.date, partySize: input.partySize, slots: [] };
     const slots: Array<{ time: string; available: boolean }> = [];
@@ -200,7 +199,6 @@ export class OnlineBookingsService {
     const restaurant = await this.restaurantBySlug(slug); const settings = restaurant.onlineBooking!;
     const branch = await this.resolveBranch(restaurant.id, input.branch);
     if (input.partySize < settings.minPartySize || input.partySize > settings.maxPartySize) throw new BadRequestException("Party size is outside the allowed range");
-    if (settings.largePartyThreshold && input.partySize > settings.largePartyThreshold) return { month: input.month, availableDates: [] };
     const availableDates: string[] = [];
     for (const date of dates) {
       try {
