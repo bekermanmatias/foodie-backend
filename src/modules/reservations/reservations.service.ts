@@ -513,6 +513,138 @@ export class ReservationsService {
     return updated;
   }
 
+  async updateEvent(
+    user: RequestUser,
+    reservationId: string,
+    input: {
+      fullName?: string;
+      phone?: string;
+      email?: string | null;
+      partySize?: number;
+      serviceDate?: string;
+      serviceTime?: string;
+      notes?: string | null;
+      rooms?: Array<{ roomId: string; allocatedCovers: number; usage: "partial" | "full" }>;
+    },
+    options?: { enforceRole?: boolean }
+  ) {
+    const restaurantId = this.restaurantScope(user);
+    if (options?.enforceRole !== false && !new Set(["restaurant_owner", "restaurant_manager", "events"]).has(String(user.role))) {
+      throw new ForbiddenException("No tenes permiso para editar reservas de evento.");
+    }
+    const reservation = await this.prisma.reservation.findFirst({
+      where: { id: reservationId, restaurantId, status: { in: ["pending", "confirmed"] } },
+      include: { customer: true, eventRoomAssignments: true }
+    });
+    if (!reservation) throw new NotFoundException("Reserva de evento activa no encontrada.");
+    if (!reservation.eventRoomAssignments.length) throw new ConflictException("Esta reserva no es un evento.");
+
+    const nextPartySize = input.partySize ?? reservation.partySize;
+    if (!Number.isInteger(nextPartySize) || nextPartySize < 1) throw new BadRequestException("Cantidad de comensales invalida.");
+    const nextServiceDate = input.serviceDate ? new Date(input.serviceDate) : reservation.serviceDate;
+    if (Number.isNaN(nextServiceDate.getTime())) throw new BadRequestException("Invalid service date");
+    const nextServiceTime = this.normalizeServiceTime(input.serviceTime ?? reservation.serviceTime, reservation.turn);
+    const nextTurn = this.deriveTurnFromServiceTime(nextServiceTime);
+    const nextBranchId = reservation.branchId;
+
+    const specialService = await this.resolveSpecialService(restaurantId, nextBranchId, nextServiceDate, nextServiceTime);
+    if (!specialService) await this.validateBookingException(restaurantId, nextBranchId, nextServiceDate, nextServiceTime);
+
+    const sourceAssignments = input.rooms?.length
+      ? input.rooms
+      : reservation.eventRoomAssignments.map((assignment) => ({
+          roomId: assignment.roomId,
+          allocatedCovers: assignment.allocatedCovers,
+          usage: assignment.usage as "partial" | "full"
+        }));
+    const uniqueAssignments = new Map<string, { roomId: string; allocatedCovers: number; usage: "partial" | "full" }>();
+    for (const assignment of sourceAssignments) {
+      if (uniqueAssignments.has(assignment.roomId)) throw new BadRequestException("Un salon solo puede asignarse una vez al evento.");
+      uniqueAssignments.set(assignment.roomId, assignment);
+    }
+    const assignments = [...uniqueAssignments.values()];
+    if (assignments.reduce((total, assignment) => total + assignment.allocatedCovers, 0) !== nextPartySize) {
+      throw new BadRequestException("Los cubiertos distribuidos entre salones deben coincidir con el total del evento.");
+    }
+
+    const rooms = await this.prisma.room.findMany({
+      where: { id: { in: assignments.map((assignment) => assignment.roomId) }, restaurantId, branchId: nextBranchId, isActive: true },
+      include: { tables: { where: { isActive: true, isReservable: true }, select: { seats: true, metadata: true } } }
+    });
+    if (rooms.length !== assignments.length) throw new NotFoundException("Uno o mas salones no pertenecen a la sede de la reserva.");
+    const roomById = new Map(rooms.map((room) => [room.id, room]));
+    const exceptions = await Promise.all(assignments.map(async (assignment) => {
+      const room = roomById.get(assignment.roomId)!;
+      const capacity = room.tables.reduce((total, table) => total + this.tableCapacity(table), 0);
+      return { roomId: room.id, roomName: room.name, blocked: await this.isRoomBlocked(restaurantId, room.id, nextServiceDate, nextTurn), exceedsCapacity: assignment.allocatedCovers > capacity, capacity, allocatedCovers: assignment.allocatedCovers };
+    }));
+    const automaticOverride = exceptions.some((exception) => exception.blocked || exception.exceedsCapacity);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const roomIds = assignments.map((assignment) => assignment.roomId);
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Room" WHERE "id" IN (${Prisma.join(roomIds)}) FOR UPDATE`);
+      const normalConflict = await tx.reservation.findFirst({
+        where: { restaurantId, id: { not: reservation.id }, roomId: { in: roomIds }, serviceDate: nextServiceDate, turn: nextTurn, specialServiceId: specialService?.id || null, status: { in: ["pending", "confirmed", "seated"] } },
+        select: { code: true }
+      });
+      if (normalConflict) throw new ConflictException(`El salon ya tiene una reserva activa (${normalConflict.code}) para este servicio.`);
+      const eventConflict = await tx.reservationRoomAssignment.findFirst({
+        where: {
+          roomId: { in: roomIds },
+          reservation: {
+            id: { not: reservation.id },
+            restaurantId,
+            serviceDate: nextServiceDate,
+            turn: nextTurn,
+            specialServiceId: specialService?.id || null,
+            status: { in: ["pending", "confirmed", "seated"] }
+          }
+        },
+        select: { id: true }
+      });
+      if (eventConflict) throw new ConflictException("Uno de los salones ya esta asignado a otro evento para este servicio.");
+
+      const nextEmail = input.email !== undefined ? this.normalizeOptionalEmail(input.email) : reservation.customer?.email ?? reservation.email ?? undefined;
+      const customerData = {
+        fullName: input.fullName || reservation.fullName,
+        phone: input.phone || reservation.phone,
+        notes: input.notes === null ? undefined : input.notes ?? reservation.notes ?? undefined
+      };
+      const customer = nextEmail
+        ? await this.upsertCustomer(tx, restaurantId, { branchId: nextBranchId, ...customerData, email: nextEmail }, { incrementReservationCount: false })
+        : reservation.customerId
+          ? await tx.customer.update({ where: { id: reservation.customerId }, data: { ...customerData, email: null } })
+          : await this.upsertCustomer(tx, restaurantId, { branchId: nextBranchId, ...customerData, email: null }, { incrementReservationCount: false });
+
+      await tx.reservationRoomAssignment.deleteMany({ where: { reservationId: reservation.id } });
+      return tx.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          customerId: customer.id,
+          fullName: input.fullName || reservation.fullName,
+          phone: input.phone || reservation.phone,
+          email: input.email !== undefined ? this.normalizeOptionalEmail(input.email) ?? null : reservation.email,
+          partySize: nextPartySize,
+          serviceDate: nextServiceDate,
+          serviceTime: nextServiceTime,
+          turn: nextTurn,
+          specialServiceId: specialService?.id || null,
+          durationMinutes: specialService?.durationMinutes || reservation.durationMinutes,
+          turnoverMinutes: specialService?.turnoverMinutes ?? reservation.turnoverMinutes,
+          notes: input.notes === null ? null : input.notes ?? reservation.notes,
+          roomId: assignments[0].roomId,
+          metadata: { event: { automaticOverride, exceptions } } as Prisma.InputJsonValue,
+          eventRoomAssignments: { createMany: { data: assignments } }
+        },
+        include: { room: true, branch: true, customer: { include: { tags: true } }, tables: { include: { table: true } }, eventRoomAssignments: { include: { room: true } }, specialService: true }
+      });
+    });
+
+    this.realtimeService.publish("reservation.updated", { restaurantId, branchId: nextBranchId, roomIds: assignments.map((assignment) => assignment.roomId), reservationId: updated.id });
+    await this.auditService.log({ action: "reservation.event_updated", targetType: "reservation", targetId: updated.id, restaurantId, restaurantUserId: user.sub, metadata: { assignments, automaticOverride, exceptions } });
+    return updated;
+  }
+
   async createReservationForRestaurant(
     restaurantId: string,
     input: {
@@ -1747,10 +1879,14 @@ export class ReservationsService {
     const restaurantId = this.restaurantScope(user);
     const reservation = await this.prisma.reservation.findFirst({
       where: { id: reservationId, restaurantId },
-      select: { code: true }
+      select: { code: true, eventRoomAssignments: { select: { id: true } } }
     });
 
     if (!reservation) throw new NotFoundException("Reservation not found");
+
+    if (reservation.eventRoomAssignments.length) {
+      return this.updateEvent(user, reservationId, { serviceDate: input.serviceDate }, { enforceRole: false });
+    }
 
     return this.updateReservationForRestaurant(
       restaurantId,

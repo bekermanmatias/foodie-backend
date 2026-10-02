@@ -48,6 +48,17 @@ const eventRoomUpdateSchema = z.object({
   rooms: z.array(eventRoomSchema).min(1)
 });
 
+const eventUpdateSchema = z.object({
+  fullName: z.string().min(2).optional(),
+  phone: z.string().min(2).optional(),
+  email: z.preprocess((value) => (typeof value === "string" && !value.trim() ? undefined : value), z.string().email().optional().nullable()),
+  partySize: z.number().int().min(1).optional(),
+  serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  serviceTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  notes: z.preprocess((value) => (typeof value === "string" && !value.trim() ? null : value), z.string().max(1000).optional().nullable()),
+  rooms: z.array(eventRoomSchema).min(1).optional()
+});
+
 const availableTableOptionsSchema = z.object({
   branchId: z.string().min(1),
   roomId: z.string().min(1),
@@ -135,6 +146,12 @@ export class ReservationsController {
   @Roles("restaurant_owner", "restaurant_manager", "events")
   updateEventRooms(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) {
     return this.reservationsService.updateEventRooms(user, reservationId, eventRoomUpdateSchema.parse(body));
+  }
+
+  @Post("restaurant/reservations/:reservationId/event")
+  @Roles("restaurant_owner", "restaurant_manager", "events")
+  updateEvent(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) {
+    return this.reservationsService.updateEvent(user, reservationId, eventUpdateSchema.parse(body));
   }
 
   @Get("restaurant/reservations/available-table-options")
