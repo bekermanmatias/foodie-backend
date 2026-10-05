@@ -1,6 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { bookingStartTimes, OnlineBookingsService } = require("../dist/modules/online-bookings/online-bookings.service.js");
+const { ReservationsService } = require("../dist/modules/reservations/reservations.service.js");
 
 test("weekly lunch and dinner offer slots every 15 minutes, including the configured end", () => {
   const lunch = bookingStartTimes({ isEnabled: true, startTime: "12:00", endTime: "14:30", intervalMin: 10 }, 180);
@@ -39,8 +40,8 @@ test("calendar, availability and creation agree on weekly and special-service st
     ] : [] },
     bookingException: { findFirst: async () => null },
     bookingWindow: { findMany: async () => [
-      { isEnabled: true, startTime: "12:00", endTime: "14:30", intervalMin: 10 },
-      { isEnabled: true, startTime: "20:00", endTime: "21:30", intervalMin: 10 }
+      { isEnabled: true, service: "lunch", startTime: "12:00", endTime: "14:30", intervalMin: 10 },
+      { isEnabled: true, service: "dinner", startTime: "20:00", endTime: "21:30", intervalMin: 10 }
     ] },
     bookingCutoffRule: { findFirst: async () => null }
   };
@@ -54,7 +55,56 @@ test("calendar, availability and creation agree on weekly and special-service st
   assert.equal(regular.slots.length, 18);
   assert.ok(regular.slots.some((slot) => slot.time === "14:30"));
   const special = await service.availability("estilo-campo", { branch: branch.publicSlug, date: specialDate, partySize: 2, preferredFeatures: [] }, "test-special");
-  assert.deepEqual(special.slots.map((slot) => slot.time), ["12:00", "14:30"]);
+  assert.deepEqual(special.slots.map((slot) => slot.time), ["12:00", "14:30", "20:00", "20:15", "20:30", "20:45", "21:00", "21:15", "21:30"]);
+  assert.deepEqual(special.slots.slice(0, 2), [
+    { time: "12:00", available: true, departureTime: "14:00" },
+    { time: "14:30", available: true, departureTime: "16:00" }
+  ]);
+  assert.equal(special.slots.find((slot) => slot.time === "20:00").departureTime, undefined);
+  const dinner = await service.createPublicReservation("estilo-campo", { branch: branch.publicSlug, date: specialDate, partySize: 2, time: "20:00", fullName: "Test Guest", phone: "1234567", preferredFeatures: [] }, "test-special-dinner");
+  assert.equal(dinner.code, "ABC123");
+  await assert.rejects(service.createPublicReservation("estilo-campo", { branch: branch.publicSlug, date: specialDate, partySize: 2, time: "13:00", fullName: "Test Guest", phone: "1234567", preferredFeatures: [] }, "test-invalid-lunch"), { status: 409 });
   const created = await service.createPublicReservation("estilo-campo", { branch: branch.publicSlug, date: regularDate, partySize: 2, time: "14:30", fullName: "Test Guest", phone: "1234567", preferredFeatures: [] }, "test-create");
   assert.equal(created.code, "ABC123");
+});
+
+test("special shifts keep closed dates and disabled or custom dinner windows respected", async () => {
+  const date = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 2, 18)).toISOString().slice(0, 10);
+  const branch = { id: "branch", publicSlug: "branch", isEnabled: true, publicBookingEnabled: true, onlineBookingDurationMinutes: 120 };
+  const restaurant = { id: "restaurant", isActive: true, onlineBooking: { isEnabled: true, minPartySize: 1, maxPartySize: 10, maxAdvanceDays: 180, minAdvanceMinutes: 0 } };
+  let exception = null;
+  let dinnerEnabled = false;
+  const prisma = {
+    restaurant: { findUnique: async () => restaurant }, branch: { findFirst: async () => branch },
+    specialService: { findMany: async () => [{ id: "lunch", startTime: "12:00", endTime: "14:00", durationMinutes: 120, turnoverMinutes: 0, intervalMin: 120 }] },
+    bookingException: { findFirst: async () => exception },
+    bookingWindow: { findMany: async () => [{ isEnabled: dinnerEnabled, service: "dinner", startTime: "20:00", endTime: "20:30", intervalMin: 15 }] },
+    bookingCutoffRule: { findFirst: async () => null }
+  };
+  const service = new OnlineBookingsService(prisma, { findAvailableRoomForRestaurant: async () => ({ roomId: "room" }) }, {});
+  const query = { branch: "branch", date, partySize: 2, preferredFeatures: [] };
+  assert.deepEqual((await service.availability("slug", query, "disabled-dinner")).slots.map((slot) => slot.time), ["12:00"]);
+  dinnerEnabled = true;
+  assert.deepEqual((await service.availability("slug", query, "regular-dinner")).slots.map((slot) => slot.time), ["12:00", "20:00", "20:15", "20:30"]);
+  exception = { type: "custom_hours", windows: [{ service: "dinner", startTime: "21:00", endTime: "21:30" }] };
+  assert.deepEqual((await service.availability("slug", query, "custom-dinner")).slots.map((slot) => slot.time), ["12:00", "21:00", "21:15", "21:30"]);
+  exception = { type: "closed" };
+  assert.deepEqual((await service.availability("slug", query, "closed-date")).slots, []);
+});
+
+test("reservation validation allows regular dinner alongside special lunch but rejects extra lunch starts", async () => {
+  const date = new Date("2026-10-18T00:00:00.000Z");
+  const prisma = { specialService: { findMany: async () => [{ id: "first", startTime: "12:00", endTime: "14:00", durationMinutes: 120, turnoverMinutes: 0 }] } };
+  const reservations = new ReservationsService(prisma, {}, {});
+  assert.equal((await reservations.resolveSpecialService("restaurant", "branch", date, "12:00")).id, "first");
+  await assert.rejects(reservations.resolveSpecialService("restaurant", "branch", date, "13:00"), { status: 409 });
+  assert.equal(await reservations.resolveSpecialService("restaurant", "branch", date, "20:00"), null);
+});
+
+test("custom dinner windows accept their last advertised arrival time", async () => {
+  const prisma = { bookingException: { findUnique: async () => ({ type: "custom_hours", windows: [{ service: "dinner", startTime: "21:00", endTime: "21:30" }] }) } };
+  const reservations = new ReservationsService(prisma, {}, {});
+  const date = new Date("2026-10-18T00:00:00.000Z");
+  await reservations.validateBookingException("restaurant", "branch", date, "21:30");
+  await assert.rejects(reservations.validateBookingException("restaurant", "branch", date, "21:45"), { status: 409 });
 });

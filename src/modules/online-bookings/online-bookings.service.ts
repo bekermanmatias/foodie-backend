@@ -91,19 +91,30 @@ export class OnlineBookingsService {
   }
   private async schedulesFor(restaurantId: string, branchId: string, date: string, timezone: string): Promise<Schedule[]> {
     const specialServices = await this.prisma.specialService.findMany({ where: { restaurantId, branchId, serviceDate: serviceDate(date) }, orderBy: { position: "asc" } });
-    if (specialServices.length) return specialServices.map((item) => ({ isEnabled: true, startTime: item.startTime, endTime: item.endTime, intervalMin: item.intervalMin, durationMinutes: item.durationMinutes, turnoverMinutes: item.turnoverMinutes, label: item.label, specialServiceId: item.id }));
     const exception = await this.prisma.bookingException.findFirst({ where: { restaurantId, branchId, serviceDate: serviceDate(date) } });
+    if (exception && exception.type !== "custom_hours") return [];
+    let regular: Schedule[];
     if (exception) {
-      if (exception.type !== "custom_hours") return [];
       const windows = Array.isArray(exception.windows) ? exception.windows : [];
-      return windows.filter((item): item is { startTime: string; endTime: string; intervalMin?: number; service?: "lunch" | "dinner" } => Boolean(item && typeof item === "object" && "startTime" in item && "endTime" in item)).map((item) => ({ isEnabled: true, startTime: item.startTime, endTime: item.endTime, intervalMin: item.intervalMin || 15, service: item.service }));
+      regular = windows.filter((item): item is { startTime: string; endTime: string; intervalMin?: number; service?: "lunch" | "dinner" } => Boolean(item && typeof item === "object" && "startTime" in item && "endTime" in item)).map((item) => ({ isEnabled: true, startTime: item.startTime, endTime: item.endTime, intervalMin: item.intervalMin || 15, service: item.service }));
+    } else {
+      const windows = await this.prisma.bookingWindow.findMany({ where: { restaurantId, branchId, weekday: weekday(date, timezone) }, orderBy: [{ service: "asc" }, { startTime: "asc" }] });
+      if (windows.length) regular = windows.filter((window) => window.isEnabled);
+      else {
+        const legacy = await this.prisma.onlineBookingException.findFirst({ where: { restaurantId, branchId, serviceDate: serviceDate(date) } });
+        if (legacy) regular = legacy.isClosed || !legacy.startTime || !legacy.endTime || !legacy.intervalMin ? [] : [{ isEnabled: true, startTime: legacy.startTime, endTime: legacy.endTime, intervalMin: legacy.intervalMin }];
+        else {
+          const legacySchedule = await this.prisma.onlineBookingSchedule.findFirst({ where: { restaurantId, branchId, weekday: weekday(date, timezone), isEnabled: true } });
+          regular = legacySchedule ? [legacySchedule] : [];
+        }
+      }
     }
-    const windows = await this.prisma.bookingWindow.findMany({ where: { restaurantId, branchId, weekday: weekday(date, timezone) }, orderBy: [{ service: "asc" }, { startTime: "asc" }] });
-    if (windows.length) return windows.filter((window) => window.isEnabled);
-    const legacy = await this.prisma.onlineBookingException.findFirst({ where: { restaurantId, branchId, serviceDate: serviceDate(date) } });
-    if (legacy) return legacy.isClosed || !legacy.startTime || !legacy.endTime || !legacy.intervalMin ? [] : [{ isEnabled: true, startTime: legacy.startTime, endTime: legacy.endTime, intervalMin: legacy.intervalMin }];
-    const legacySchedule = await this.prisma.onlineBookingSchedule.findFirst({ where: { restaurantId, branchId, weekday: weekday(date, timezone), isEnabled: true } });
-    return legacySchedule ? [legacySchedule] : [];
+    if (!specialServices.length) return regular;
+    const specialTurns = new Set(specialServices.map((item) => timeToMinutes(item.startTime) < 17 * 60 ? "lunch" : "dinner"));
+    return [
+      ...specialServices.map((item) => ({ isEnabled: true, startTime: item.startTime, endTime: item.endTime, intervalMin: item.intervalMin, durationMinutes: item.durationMinutes, turnoverMinutes: item.turnoverMinutes, label: item.label, specialServiceId: item.id })),
+      ...regular.filter((item) => !specialTurns.has(item.service || (timeToMinutes(item.startTime) < 17 * 60 ? "lunch" : "dinner")))
+    ].sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
   }
   private async resolveBranch(restaurantId: string, publicSlug: string) {
     const branch = await this.prisma.branch.findFirst({ where: { restaurantId, publicSlug } });
@@ -192,11 +203,11 @@ export class OnlineBookingsService {
     this.validateWindow(input.date, settings, ARGENTINA_TIMEZONE);
     const schedules = await this.schedulesFor(restaurant.id, branch.id, input.date, ARGENTINA_TIMEZONE);
     if (!schedules.length) return { date: input.date, partySize: input.partySize, slots: [] };
-    const slots: Array<{ time: string; available: boolean }> = [];
+    const slots: Array<{ time: string; available: boolean; departureTime?: string }> = [];
     for (const schedule of schedules) for (const time of bookingStartTimes(schedule, branch.onlineBookingDurationMinutes)) {
       if (!this.meetsAdvance(input.date, time, await this.minimumAdvance(restaurant.id, input.date, time, ARGENTINA_TIMEZONE, settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) continue;
       const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: restaurant.id, branchId: branch.id, partySize: input.partySize, serviceDate: input.date, serviceTime: time, preferredFeatures: input.preferredFeatures, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 });
-      if (available) slots.push({ time, available: true });
+      if (available) slots.push({ time, available: true, ...(schedule.specialServiceId ? { departureTime: schedule.endTime } : {}) });
     }
     return { date: input.date, partySize: input.partySize, slots };
   }

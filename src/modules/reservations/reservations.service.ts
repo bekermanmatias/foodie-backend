@@ -58,7 +58,7 @@ export class ReservationsService {
     if (exception.type !== "custom_hours") throw new ConflictException("El restaurante no toma reservas en esta fecha.");
     const service = this.deriveTurnFromServiceTime(serviceTime) === "mediodia" ? "lunch" : "dinner";
     const windows = Array.isArray(exception.windows) ? exception.windows as Array<{ service?: string; startTime?: string; endTime?: string }> : [];
-    const window = windows.find((item) => item.service === service && item.startTime && item.endTime && serviceTime >= item.startTime && serviceTime < item.endTime);
+    const window = windows.find((item) => item.service === service && item.startTime && item.endTime && serviceTime >= item.startTime && serviceTime <= item.endTime);
     if (!window) throw new ConflictException("El turno seleccionado no está disponible para esta fecha.");
   }
 
@@ -903,8 +903,10 @@ export class ReservationsService {
       const windowEnd = this.timeToMinutes(item.endTime);
       return start === windowStart && start + item.durationMinutes + item.turnoverMinutes <= windowEnd;
     });
-    if (!service) throw new ConflictException("El horario no pertenece a una franja especial disponible o invade el tiempo de recambio.");
-    return service;
+    if (!service && services.some((item) => this.deriveTurnFromServiceTime(item.startTime) === this.deriveTurnFromServiceTime(serviceTime) || (serviceTime >= item.startTime && serviceTime < item.endTime))) {
+      throw new ConflictException("El horario no pertenece a una franja especial disponible o invade el tiempo de recambio.");
+    }
+    return service || null;
   }
 
   private normalizeReservationCode(code: string) {
