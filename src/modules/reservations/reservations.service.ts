@@ -23,12 +23,6 @@ export class ReservationsService {
     return user.restaurantId;
   }
 
-  private assertEventsCannotCreateStandardReservations(user: RequestUser) {
-    if (user.scope === "restaurant" && user.role === "events") {
-      throw new ForbiddenException("El rol Eventos debe crear reservas de evento.");
-    }
-  }
-
   private normalizeOptionalEmail(email?: string | null) {
     const value = email?.trim();
     return value ? value.toLowerCase() : undefined;
@@ -298,7 +292,6 @@ export class ReservationsService {
     }
   ) {
     const restaurantId = this.restaurantScope(user);
-    this.assertEventsCannotCreateStandardReservations(user);
     return this.createReservationForRestaurant(restaurantId, input, { actorUserId: user.sub });
   }
 
@@ -1055,8 +1048,8 @@ export class ReservationsService {
 
   async deleteCancelled(user: RequestUser, reservationId: string) {
     const restaurantId = this.restaurantScope(user);
-    if (!new Set(["restaurant_owner", "restaurant_manager"]).has(String(user.role))) {
-      throw new ForbiddenException("Solo el dueño o gerente puede eliminar reservas");
+    if (!new Set(["restaurant_owner", "restaurant_manager", "events"]).has(String(user.role))) {
+      throw new ForbiddenException("Solo el dueño, gerente o eventos puede eliminar reservas");
     }
 
     const reservation = await this.prisma.reservation.findFirst({

@@ -187,7 +187,7 @@ export class ReservationsController {
   }
 
   @Delete("restaurant/reservations/:reservationId")
-  @Roles("restaurant_owner", "restaurant_manager")
+  @Roles("restaurant_owner", "restaurant_manager", "events")
   remove(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string) {
     return this.reservationsService.deleteCancelled(user, reservationId);
   }
