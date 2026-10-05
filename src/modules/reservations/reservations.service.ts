@@ -113,13 +113,27 @@ export class ReservationsService {
     turn: "mediodia" | "noche",
     client: PrismaService | Prisma.TransactionClient = this.prisma,
     specialServiceId?: string | null,
-    excludeReservationId?: string
+    excludeReservationId?: string,
+    allowEventRoomConflict = false
   ) {
     if (await this.isRoomBlocked(restaurantId, roomId, serviceDate, turn, client)) {
       throw new ConflictException("El salon esta cerrado para reservas en la fecha y turno seleccionados.");
     }
     if (await this.isRoomAssignedToActiveEvent(restaurantId, roomId, serviceDate, turn, specialServiceId, client, excludeReservationId)) {
-      throw new ConflictException("El salon esta asignado a un evento para el servicio seleccionado.");
+      const fullEvent = await client.reservationRoomAssignment.findFirst({
+        where: {
+          roomId,
+          usage: "full",
+          reservation: {
+            restaurantId, serviceDate, turn, specialServiceId: specialServiceId || null,
+            status: { in: ["pending", "confirmed", "seated"] },
+            ...(excludeReservationId ? { id: { not: excludeReservationId } } : {})
+          }
+        },
+        select: { id: true }
+      });
+      if (fullEvent) throw new ConflictException("El salon esta asignado totalmente a un evento para este servicio.");
+      if (!allowEventRoomConflict) throw new ConflictException("El salon esta asignado a un evento parcial para el servicio seleccionado.");
     }
   }
 
@@ -289,9 +303,13 @@ export class ReservationsService {
       turnoverMinutes?: number;
       tableIds?: string[];
       manualTableSelection?: boolean;
+      allowEventRoomConflict?: boolean;
     }
   ) {
     const restaurantId = this.restaurantScope(user);
+    if (input.allowEventRoomConflict && !new Set(["restaurant_owner", "restaurant_manager", "events"]).has(String(user.role))) {
+      throw new ForbiddenException("No tenes permiso para continuar con un salon asignado a un evento.");
+    }
     return this.createReservationForRestaurant(restaurantId, input, { actorUserId: user.sub });
   }
 
@@ -659,6 +677,7 @@ export class ReservationsService {
       turnoverMinutes?: number;
       tableIds?: string[];
       manualTableSelection?: boolean;
+      allowEventRoomConflict?: boolean;
     },
     options?: { actorUserId?: string; idempotencyKey?: string; source?: ReservationSource }
   ) {
@@ -678,7 +697,7 @@ export class ReservationsService {
     const turn = this.deriveTurnFromServiceTime(serviceTime);
     const specialService = await this.resolveSpecialService(restaurantId, input.branchId, serviceDate, serviceTime);
     if (!specialService) await this.validateBookingException(restaurantId, input.branchId, serviceDate, serviceTime);
-    await this.assertRoomIsBookable(restaurantId, input.roomId, serviceDate, turn, this.prisma, specialService?.id);
+    await this.assertRoomIsBookable(restaurantId, input.roomId, serviceDate, turn, this.prisma, specialService?.id, undefined, input.allowEventRoomConflict);
     const durationMinutes = specialService?.durationMinutes || input.durationMinutes || 180;
     const turnoverMinutes = specialService?.turnoverMinutes || 0;
 
@@ -726,7 +745,7 @@ export class ReservationsService {
       // Serializes assignment attempts within a room. This prevents two public
       // requests from both seeing the same last table before either commits.
       await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Table" WHERE "roomId" = ${input.roomId} FOR UPDATE`);
-      await this.assertRoomIsBookable(restaurantId, input.roomId, serviceDate, turn, tx, specialService?.id);
+      await this.assertRoomIsBookable(restaurantId, input.roomId, serviceDate, turn, tx, specialService?.id, undefined, input.allowEventRoomConflict);
       const assignment = input.tableIds?.length
         ? await (input.manualTableSelection ? this.findManualRequestedAssignment(tx, {
             restaurantId, roomId: input.roomId, serviceDate, turn, partySize: input.partySize,
@@ -803,7 +822,8 @@ export class ReservationsService {
               assignedFeatures: assignment.features,
               assignedTableIds: assignment.tableIds,
               assignedTableLabels: assignment.tableLabels
-            }
+            },
+            ...(input.allowEventRoomConflict ? { eventRoomConflictOverride: true } : {})
           } as Prisma.InputJsonValue,
           tables: {
             createMany: {
@@ -866,7 +886,8 @@ export class ReservationsService {
       restaurantId,
       metadata: {
         actorUserId: options?.actorUserId || null,
-        idempotencyKey: options?.idempotencyKey || null
+        idempotencyKey: options?.idempotencyKey || null,
+        eventRoomConflictOverride: Boolean(input.allowEventRoomConflict)
       }
     });
 

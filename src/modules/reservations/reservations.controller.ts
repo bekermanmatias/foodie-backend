@@ -23,7 +23,8 @@ const reservationSchema = z.object({
   birthday: z.string().optional(),
   notes: z.string().optional(),
   tableIds: z.array(z.string().min(1)).min(1).optional(),
-  manualTableSelection: z.boolean().optional()
+  manualTableSelection: z.boolean().optional(),
+  allowEventRoomConflict: z.boolean().optional()
 });
 
 const eventRoomSchema = z.object({
