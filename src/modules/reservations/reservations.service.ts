@@ -81,7 +81,7 @@ export class ReservationsService {
     }));
   }
 
-  private async isRoomAssignedToActiveEvent(
+  private async isRoomAssignedToFullEvent(
     restaurantId: string,
     roomId: string,
     serviceDate: Date,
@@ -93,6 +93,7 @@ export class ReservationsService {
     return Boolean(await client.reservationRoomAssignment.findFirst({
       where: {
         roomId,
+        usage: "full",
         reservation: {
           restaurantId,
           serviceDate,
@@ -119,21 +120,8 @@ export class ReservationsService {
     if (await this.isRoomBlocked(restaurantId, roomId, serviceDate, turn, client)) {
       throw new ConflictException("El salon esta cerrado para reservas en la fecha y turno seleccionados.");
     }
-    if (await this.isRoomAssignedToActiveEvent(restaurantId, roomId, serviceDate, turn, specialServiceId, client, excludeReservationId)) {
-      const fullEvent = await client.reservationRoomAssignment.findFirst({
-        where: {
-          roomId,
-          usage: "full",
-          reservation: {
-            restaurantId, serviceDate, turn, specialServiceId: specialServiceId || null,
-            status: { in: ["pending", "confirmed", "seated"] },
-            ...(excludeReservationId ? { id: { not: excludeReservationId } } : {})
-          }
-        },
-        select: { id: true }
-      });
-      if (fullEvent) throw new ConflictException("El salon esta asignado totalmente a un evento para este servicio.");
-      if (!allowEventRoomConflict) throw new ConflictException("El salon esta asignado a un evento parcial para el servicio seleccionado.");
+    if (await this.isRoomAssignedToFullEvent(restaurantId, roomId, serviceDate, turn, specialServiceId, client, excludeReservationId)) {
+      throw new ConflictException("El salon esta asignado totalmente a un evento para este servicio.");
     }
   }
 
@@ -1049,7 +1037,7 @@ export class ReservationsService {
       orderBy: [{ bookingPriority: "asc" }, { createdAt: "asc" }]
     });
     for (const room of rooms) {
-      if (await this.isRoomAssignedToActiveEvent(input.restaurantId, room.id, serviceDate, turn, specialService?.id)) continue;
+      if (await this.isRoomAssignedToFullEvent(input.restaurantId, room.id, serviceDate, turn, specialService?.id)) continue;
       const assignment = await this.assignTables(this.prisma, {
         restaurantId: input.restaurantId,
         roomId: room.id,
@@ -1201,7 +1189,7 @@ export class ReservationsService {
     if (!room) throw new NotFoundException("Salon no encontrado en la sucursal de la reserva.");
 
     const roomBlocked = await this.isRoomBlocked(restaurantId, room.id, reservation.serviceDate, reservation.turn);
-    const assignedToEvent = await this.isRoomAssignedToActiveEvent(restaurantId, room.id, reservation.serviceDate, reservation.turn, reservation.specialServiceId, this.prisma, reservation.id);
+    const assignedToEvent = await this.isRoomAssignedToFullEvent(restaurantId, room.id, reservation.serviceDate, reservation.turn, reservation.specialServiceId, this.prisma, reservation.id);
     const roomUnavailableReason = roomBlocked
       ? "El salon esta cerrado para este turno."
       : assignedToEvent ? "El salon esta asignado a un evento." : null;
@@ -1446,7 +1434,7 @@ export class ReservationsService {
     if (!specialService) await this.validateBookingException(input.restaurantId, input.branchId, serviceDate, serviceTime);
     if (
       await this.isRoomBlocked(input.restaurantId, input.roomId, serviceDate, turn) ||
-      await this.isRoomAssignedToActiveEvent(input.restaurantId, input.roomId, serviceDate, turn, specialService?.id)
+      await this.isRoomAssignedToFullEvent(input.restaurantId, input.roomId, serviceDate, turn, specialService?.id)
     ) {
       return {
         available: false, status: "unavailable", branchId: input.branchId, roomId: input.roomId, turn,
@@ -1882,6 +1870,33 @@ export class ReservationsService {
       select: { tableId: true }
     });
     blockedIds.forEach((item) => takenIds.add(item.tableId));
+
+    const partialEvents = await client.reservationRoomAssignment.findMany({
+      where: {
+        roomId: input.roomId,
+        usage: "partial",
+        reservation: {
+          restaurantId: input.restaurantId,
+          serviceDate: input.serviceDate,
+          turn: input.turn,
+          status: { in: ["pending", "confirmed", "seated"] },
+          ...(input.excludeReservationId ? { id: { not: input.excludeReservationId } } : {})
+        }
+      },
+      select: { allocatedCovers: true, reservation: { select: { serviceTime: true, durationMinutes: true, turnoverMinutes: true } } }
+    });
+    const eventCovers = partialEvents.reduce((total, assignment) => {
+      const start = this.timeToMinutes(assignment.reservation.serviceTime);
+      const end = start + assignment.reservation.durationMinutes + assignment.reservation.turnoverMinutes;
+      return total + (requestedStart < end && start < requestedEnd ? assignment.allocatedCovers : 0);
+    }, 0);
+    if (eventCovers) {
+      const capacityTables = input.preferredZone
+        ? await client.table.findMany({ where: { restaurantId: input.restaurantId, roomId: input.roomId, isActive: true, isReservable: true } })
+        : roomTables;
+      const freeCapacity = capacityTables.filter((table) => !takenIds.has(table.id)).reduce((total, table) => total + this.tableCapacity(table), 0);
+      if (input.partySize + eventCovers > freeCapacity) return [];
+    }
 
     const preferredFeatures = input.preferredFeatures || [];
     const availableTables = roomTables
