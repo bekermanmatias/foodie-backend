@@ -1178,7 +1178,7 @@ export class ReservationsService {
     });
   }
 
-  async listTableAvailabilityForReassignment(user: RequestUser, reservationId: string, roomId: string, excludedTableIds: string[] = []) {
+  async listTableAvailabilityForReassignment(user: RequestUser, reservationId: string, roomId: string, excludedTableIds: string[] = [], draft: { serviceDate?: string; serviceTime?: string; partySize?: number } = {}) {
     const restaurantId = this.restaurantScope(user);
     const reservation = await this.reassignableReservationOrThrow(restaurantId, reservationId);
     await this.assertStandardReservationForManualReassignment(reservationId, restaurantId);
@@ -1188,8 +1188,13 @@ export class ReservationsService {
     });
     if (!room) throw new NotFoundException("Salon no encontrado en la sucursal de la reserva.");
 
-    const roomBlocked = await this.isRoomBlocked(restaurantId, room.id, reservation.serviceDate, reservation.turn);
-    const assignedToEvent = await this.isRoomAssignedToFullEvent(restaurantId, room.id, reservation.serviceDate, reservation.turn, reservation.specialServiceId, this.prisma, reservation.id);
+    const serviceDate = draft.serviceDate ? new Date(draft.serviceDate) : reservation.serviceDate;
+    if (Number.isNaN(serviceDate.getTime())) throw new BadRequestException("Invalid service date");
+    const serviceTime = this.normalizeServiceTime(draft.serviceTime || reservation.serviceTime);
+    const turn = this.deriveTurnFromServiceTime(serviceTime);
+    const specialService = await this.resolveSpecialService(restaurantId, reservation.branchId, serviceDate, serviceTime);
+    const roomBlocked = await this.isRoomBlocked(restaurantId, room.id, serviceDate, turn);
+    const assignedToEvent = await this.isRoomAssignedToFullEvent(restaurantId, room.id, serviceDate, turn, specialService?.id, this.prisma, reservation.id);
     const roomUnavailableReason = roomBlocked
       ? "El salon esta cerrado para este turno."
       : assignedToEvent ? "El salon esta asignado a un evento." : null;
@@ -1197,12 +1202,12 @@ export class ReservationsService {
     const availableTableIds = roomUnavailableReason ? new Set<string>() : new Set((await this.listAvailableTables(this.prisma, {
       restaurantId,
       roomId: room.id,
-      serviceDate: reservation.serviceDate,
-      turn: reservation.turn,
-      serviceTime: reservation.serviceTime,
-      durationMinutes: reservation.durationMinutes,
-      turnoverMinutes: reservation.turnoverMinutes,
-      partySize: reservation.partySize,
+      serviceDate: serviceDate,
+      turn: turn,
+      serviceTime: serviceTime,
+      durationMinutes: specialService?.durationMinutes || reservation.durationMinutes,
+      turnoverMinutes: specialService?.turnoverMinutes ?? reservation.turnoverMinutes,
+      partySize: draft.partySize || reservation.partySize,
       excludeReservationId: reservation.id,
       requireFreeState: true
     })).map((table) => table.id));
@@ -1578,7 +1583,7 @@ export class ReservationsService {
       roomId?: string;
       fullName?: string;
       phone?: string;
-      email?: string;
+      email?: string | null;
       partySize?: number;
       serviceDate?: string;
       serviceTime?: string;
@@ -1587,6 +1592,7 @@ export class ReservationsService {
       preferredTags?: string[];
       birthday?: string | null;
       notes?: string | null;
+      tableIds?: string[];
     },
     options?: { actorUserId?: string; idempotencyKey?: string }
   ) {
@@ -1637,25 +1643,23 @@ export class ReservationsService {
       throw new NotFoundException("Room not found");
     }
 
-    const assignment = await this.assignTables(this.prisma, {
-      restaurantId,
-      roomId: nextRoomId,
-      serviceDate: nextServiceDate,
-      turn: nextTurn,
-      partySize: nextPartySize,
-      preferredZone: input.preferredZone === null ? undefined : input.preferredZone || reservation.preferredZone || undefined,
-      serviceTime: nextServiceTime,
-      durationMinutes: nextDurationMinutes,
-      turnoverMinutes: nextTurnoverMinutes,
-      excludeReservationId: reservation.id
-    });
-
-    if (!assignment) {
-      throw new ConflictException("No valid table or combination available");
-    }
-
     const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Reservation" WHERE "id" = ${reservation.id} FOR UPDATE`);
+      await this.reassignableReservationOrThrow(restaurantId, reservation.id, tx);
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Table" WHERE "roomId" = ${nextRoomId} FOR UPDATE`);
       await this.assertRoomIsBookable(restaurantId, nextRoomId, nextServiceDate, nextTurn, tx, specialService?.id, reservation.id);
+      const assignmentInput = {
+        restaurantId, roomId: nextRoomId, serviceDate: nextServiceDate, turn: nextTurn,
+        partySize: nextPartySize,
+        preferredZone: input.tableIds || input.preferredZone === null ? undefined : input.preferredZone || reservation.preferredZone || undefined,
+        serviceTime: nextServiceTime, durationMinutes: nextDurationMinutes,
+        turnoverMinutes: nextTurnoverMinutes, excludeReservationId: reservation.id
+      };
+      const assignment = input.tableIds
+        ? await this.findManualRequestedAssignment(tx, assignmentInput, input.tableIds)
+        : await this.assignTables(tx, assignmentInput);
+      if (!assignment) throw new ConflictException("Las mesas no están disponibles o no tienen capacidad para esta reserva.");
+
       const normalizedEmail = input.email !== undefined
         ? this.normalizeOptionalEmail(input.email)
         : reservation.email;
@@ -1741,6 +1745,8 @@ export class ReservationsService {
             },
             update: {
               status: "reserved",
+              serviceDate: nextServiceDate,
+              turn: nextTurn,
               roomId: nextRoomId,
               branchId: nextBranchId,
               reservationId: reservation.id,
@@ -1904,6 +1910,23 @@ export class ReservationsService {
       .filter((table) => tableMatchesPreferredFeatures(table, preferredFeatures));
 
     return availableTables;
+  }
+
+  async updateManual(user: RequestUser, reservationId: string, input: {
+    fullName?: string; phone?: string; email?: string | null; partySize?: number;
+    serviceDate?: string; serviceTime?: string; notes?: string | null;
+    roomId?: string; tableIds?: string[];
+  }) {
+    const restaurantId = this.restaurantScope(user);
+    const reservation = await this.reassignableReservationOrThrow(restaurantId, reservationId);
+    await this.assertStandardReservationForManualReassignment(reservationId, restaurantId);
+    if (input.tableIds && new Set(input.tableIds).size !== input.tableIds.length) {
+      throw new BadRequestException("Las mesas seleccionadas están repetidas.");
+    }
+    return this.updateReservationForRestaurant(restaurantId, {
+      ...input, code: reservation.code,
+      preferredZone: input.roomId && input.roomId !== reservation.roomId ? null : reservation.preferredZone
+    }, { actorUserId: user.sub });
   }
 
   async reschedule(user: RequestUser, reservationId: string, input: { serviceDate: string }) {

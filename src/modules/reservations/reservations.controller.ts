@@ -69,6 +69,11 @@ const availableTableOptionsSchema = z.object({
   preferredZone: z.string().optional()
 });
 
+const reservationUpdateSchema = eventUpdateSchema.omit({ rooms: true }).extend({
+  roomId: z.string().min(1).optional(),
+  tableIds: z.array(z.string().min(1)).min(1).optional()
+});
+
 const availableManualTablesSchema = z.object({
   branchId: z.string().min(1),
   roomId: z.string().min(1),
@@ -187,6 +192,12 @@ export class ReservationsController {
     return this.reservationsService.reschedule(user, reservationId, rescheduleSchema.parse(body));
   }
 
+  @Post("restaurant/reservations/:reservationId/update")
+  @Roles("restaurant_owner", "restaurant_manager", "host", "events")
+  update(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) {
+    return this.reservationsService.updateManual(user, reservationId, reservationUpdateSchema.parse(body));
+  }
+
   @Delete("restaurant/reservations/:reservationId")
   @Roles("restaurant_owner", "restaurant_manager", "events")
   remove(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string) {
@@ -200,8 +211,13 @@ export class ReservationsController {
 
   @Get("restaurant/reservations/:reservationId/table-availability")
   tableAvailability(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Query() query: Record<string, unknown>) {
-    const input = z.object({ roomId: z.string().min(1), excludeTableIds: z.string().optional() }).parse(query);
-    return this.reservationsService.listTableAvailabilityForReassignment(user, reservationId, input.roomId, input.excludeTableIds?.split(",").filter(Boolean) || []);
+    const input = z.object({
+      roomId: z.string().min(1), excludeTableIds: z.string().optional(),
+      serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      serviceTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+      partySize: z.coerce.number().int().min(1).optional()
+    }).parse(query);
+    return this.reservationsService.listTableAvailabilityForReassignment(user, reservationId, input.roomId, input.excludeTableIds?.split(",").filter(Boolean) || [], input);
   }
 
   @Post("restaurant/reservations/:reservationId/reassign-tables")
