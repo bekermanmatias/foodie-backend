@@ -5,6 +5,7 @@ import { AuditService } from "../audit/audit.service";
 import { PrismaService } from "../prisma/prisma.service";
 import type { PreferredFeature } from "../reservations/preferred-features";
 import { ReservationsService } from "../reservations/reservations.service";
+import { mothersDayNotice, publicBookingTimeAllowed } from "./mothers-day";
 
 type Schedule = { isEnabled: boolean; startTime: string; endTime: string; intervalMin: number; service?: "lunch" | "dinner"; durationMinutes?: number; turnoverMinutes?: number; label?: string; specialServiceId?: string };
 const requests = new Map<string, number[]>();
@@ -191,7 +192,8 @@ export class OnlineBookingsService {
     }));
     const settings = restaurant.onlineBooking;
     const customization = restaurant.customization;
-    return { name: restaurant.name, slug: restaurant.slug, logoUrl: restaurant.profileImageUrl, coverImageUrl: settings?.coverImageUrl || null, whatsappPhone: customization?.humanSupportWhatsapp || settings?.whatsappPhone || null, accentColor: settings?.accentColor || "#FF5A00", publicTheme: settings?.publicTheme || "classic", minPartySize: settings?.minPartySize || 1, maxPartySize: settings?.maxPartySize || 15, largePartyThreshold: settings?.largePartyThreshold || null, commentsEnabled: settings?.commentsEnabled ?? true, publicInfo: { address: settings?.showAddress ? customization?.address || null : null, phone: settings?.showPhone ? customization?.phone || null : null, menuUrl: settings?.showMenu ? customization?.menuUrl || null : null, instagramUrl: settings?.showInstagram ? customization?.instagramUrl || null : null, mapsUrl: settings?.showGoogleMaps ? customization?.mapsUrl || null : null }, supportedFeatures, branches: restaurant.branches.filter((branch) => branch.isEnabled && branch.publicBookingEnabled).map((branch) => ({ slug: branch.publicSlug, name: branch.publicName || branch.name })) };
+    const specialLunchNotice = mothersDayNotice(restaurant);
+    return { specialLunchNotice, name: restaurant.name, slug: restaurant.slug, logoUrl: restaurant.profileImageUrl, coverImageUrl: settings?.coverImageUrl || null, whatsappPhone: customization?.humanSupportWhatsapp || settings?.whatsappPhone || null, accentColor: settings?.accentColor || "#FF5A00", publicTheme: settings?.publicTheme || "classic", minPartySize: settings?.minPartySize || 1, maxPartySize: settings?.maxPartySize || 15, largePartyThreshold: settings?.largePartyThreshold || null, commentsEnabled: settings?.commentsEnabled ?? true, publicInfo: { address: settings?.showAddress ? customization?.address || null : null, phone: settings?.showPhone ? customization?.phone || null : null, menuUrl: settings?.showMenu ? customization?.menuUrl || null : null, instagramUrl: settings?.showInstagram ? customization?.instagramUrl || null : null, mapsUrl: settings?.showGoogleMaps ? customization?.mapsUrl || null : null }, supportedFeatures, branches: restaurant.branches.filter((branch) => branch.isEnabled && branch.publicBookingEnabled).map((branch) => ({ slug: branch.publicSlug, name: branch.publicName || branch.name })) };
   }
 
   async availability(slug: string, input: { branch: string; date: string; partySize: number; preferredFeatures: PreferredFeature[] }, ip: string, skipLimit = false) {
@@ -205,6 +207,7 @@ export class OnlineBookingsService {
     if (!schedules.length) return { date: input.date, partySize: input.partySize, slots: [] };
     const slots: Array<{ time: string; available: boolean; departureTime?: string }> = [];
     for (const schedule of schedules) for (const time of bookingStartTimes(schedule, branch.onlineBookingDurationMinutes)) {
+      if (!publicBookingTimeAllowed(restaurant, input.date, time)) continue;
       if (!this.meetsAdvance(input.date, time, await this.minimumAdvance(restaurant.id, input.date, time, ARGENTINA_TIMEZONE, settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) continue;
       const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: restaurant.id, branchId: branch.id, partySize: input.partySize, serviceDate: input.date, serviceTime: time, preferredFeatures: input.preferredFeatures, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 });
       if (available) slots.push({ time, available: true, ...(schedule.specialServiceId ? { departureTime: schedule.endTime } : {}) });
@@ -226,24 +229,28 @@ export class OnlineBookingsService {
     const branch = await this.resolveBranch(restaurant.id, input.branch);
     if (input.partySize < settings.minPartySize || input.partySize > settings.maxPartySize) throw new BadRequestException("Party size is outside the allowed range");
     const availableDates: string[] = [];
+    const contactDates: string[] = [];
+    const notice = mothersDayNotice(restaurant);
     for (const date of dates) {
       try {
         this.validateWindow(date, settings, ARGENTINA_TIMEZONE);
+        if (date === notice?.date && branch.isEnabled && branch.publicBookingEnabled) contactDates.push(date);
         const schedules = await this.schedulesFor(restaurant.id, branch.id, date, ARGENTINA_TIMEZONE);
-        const bookable = await this.branchHasBookableSlot({ restaurantId: restaurant.id, branchId: branch.id, fallbackDurationMinutes: branch.onlineBookingDurationMinutes, date, partySize: input.partySize, schedules, settings });
+        const bookable = await this.branchHasBookableSlot({ restaurant, restaurantId: restaurant.id, branchId: branch.id, fallbackDurationMinutes: branch.onlineBookingDurationMinutes, date, partySize: input.partySize, schedules, settings });
         if (bookable) availableDates.push(date);
       } catch { /* Closed and out-of-window dates remain unavailable. */ }
     }
-    return { month: input.month, availableDates };
+    return { month: input.month, availableDates, contactDates };
   }
 
   // A date is only offered when at least one slot can actually seat the party,
   // using the same single-table/combination resolution as the availability endpoint.
-  private async branchHasBookableSlot(input: { restaurantId: string; branchId: string; fallbackDurationMinutes: number; date: string; partySize: number; schedules: Schedule[]; settings: { minAdvanceMinutes: number } }) {
+  private async branchHasBookableSlot(input: { restaurant: { slug?: string; name?: string }; restaurantId: string; branchId: string; fallbackDurationMinutes: number; date: string; partySize: number; schedules: Schedule[]; settings: { minAdvanceMinutes: number } }) {
     for (const schedule of input.schedules) {
       const durationMinutes = schedule.durationMinutes || input.fallbackDurationMinutes;
       const turnoverMinutes = schedule.turnoverMinutes || 0;
       for (const time of bookingStartTimes(schedule, input.fallbackDurationMinutes)) {
+        if (!publicBookingTimeAllowed(input.restaurant, input.date, time)) continue;
         if (!this.meetsAdvance(input.date, time, await this.minimumAdvance(input.restaurantId, input.date, time, ARGENTINA_TIMEZONE, input.settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) continue;
         const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: input.restaurantId, branchId: input.branchId, partySize: input.partySize, serviceDate: input.date, serviceTime: time, durationMinutes, turnoverMinutes });
         if (available) return true;
@@ -261,7 +268,7 @@ export class OnlineBookingsService {
     this.validateWindow(input.date, settings, ARGENTINA_TIMEZONE);
     const schedules = await this.schedulesFor(restaurant.id, branch.id, input.date, ARGENTINA_TIMEZONE);
     const schedule = schedules.find((item) => bookingStartTimes(item, branch.onlineBookingDurationMinutes).includes(input.time));
-    if (!schedule) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
+    if (!schedule || !publicBookingTimeAllowed(restaurant, input.date, input.time)) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
     if (!this.meetsAdvance(input.date, input.time, await this.minimumAdvance(restaurant.id, input.date, input.time, ARGENTINA_TIMEZONE, settings.minAdvanceMinutes), ARGENTINA_TIMEZONE)) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
     const available = await this.reservations.findAvailableRoomForRestaurant({ restaurantId: restaurant.id, branchId: branch.id, partySize: input.partySize, serviceDate: input.date, serviceTime: input.time, preferredFeatures: input.preferredFeatures, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 });
     if (!available) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
