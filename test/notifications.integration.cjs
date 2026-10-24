@@ -53,6 +53,7 @@ test('PostgreSQL: concurrency, idempotency, read receipts, attention, tenant iso
     assert.deepEqual(await service.counts(user), { unread: 0, pending: 1 });
     assert.deepEqual(await service.counts(second), { unread: 1, pending: 1 });
     assert.equal((await service.list(second, { page: 1, pageSize: 25, unread: true })).items.length, 1);
+    await assert.rejects(service.remove(user, id), err => err.getStatus() === 409);
     await service.attend(second, id); await service.attend(user, id);
     assert.equal((await prisma.notification.findUnique({ where: { id } })).attendedByUserId, host.id);
     assert.deepEqual(await service.counts(user), { unread: 0, pending: 0 });
@@ -67,10 +68,12 @@ test('PostgreSQL: concurrency, idempotency, read receipts, attention, tenant iso
     assert.equal((await service.list(foreign, { page: 1, pageSize: 25 })).total, 0);
     await assert.rejects(service.read(foreign, id), err => err.getStatus() === 404);
     await assert.rejects(service.attend(foreign, id), err => err.getStatus() === 404);
+    await assert.rejects(service.remove(foreign, id), err => err.getStatus() === 404);
     for (const role of ['waiter', 'cashier', 'kitchen', 'events', 'platform_admin']) {
       await assert.rejects(service.counts({ ...user, role }), err => err.getStatus() === 403);
       await assert.rejects(service.read({ ...user, role }, id), err => err.getStatus() === 403);
       await assert.rejects(service.attend({ ...user, role }, id), err => err.getStatus() === 403);
+      await assert.rejects(service.remove({ ...user, role }, id), err => err.getStatus() === 403);
     }
     await assert.rejects(service.counts({ ...user, scope: 'platform' }), err => err.getStatus() === 403);
     await assert.rejects(integrations.receiveChatOrder('bad-key', input), err => err.getStatus() === 403);
@@ -79,6 +82,20 @@ test('PostgreSQL: concurrency, idempotency, read receipts, attention, tenant iso
     assert.equal((await service.list(user, { page: 1, pageSize: 1 })).items.length, 1);
     assert.equal((await service.list(user, { status: 'attended', page: 1, pageSize: 25 })).total, 1);
     assert.equal(await prisma.auditLog.count({ where: { restaurantId: restaurant.id, action: 'notification.attended' } }), 1);
+    // Shared deletion is restricted to attended alerts. Keep source events for retries.
+    await Promise.all([service.remove(second, id), service.remove(user, id)]);
+    assert((await prisma.notification.findUnique({ where: { id } })).deletedAt);
+    assert.equal((await service.list(user, { status: 'attended', page: 1, pageSize: 25 })).total, 0);
+    assert.equal((await service.list(second, { page: 1, pageSize: 25 })).total, 1);
+    assert.deepEqual(await service.counts(user), { unread: 1, pending: 1 });
+    const replay = await integrations.receiveChatOrder(key, input);
+    assert.equal(replay.notificationId, id); assert(replay.duplicate); assert(!replay.created);
+    assert.equal((await service.list(user, { status: 'attended', page: 1, pageSize: 25 })).total, 0);
+    assert.equal(await prisma.notificationEvent.count({ where: { notificationId: id } }), 9);
+    assert.equal(await prisma.auditLog.count({ where: { restaurantId: restaurant.id, action: 'notification.deleted' } }), 1);
+    await assert.rejects(service.read(user, id), err => err.getStatus() === 404);
+    await assert.rejects(service.attend(user, id), err => err.getStatus() === 404);
+    await assert.rejects(service.remove(user, later.notificationId), err => err.getStatus() === 409);
   } finally {
     await prisma.restaurant.deleteMany({ where: { id: { in: [restaurant.id, other.id] } } });
     await prisma.$disconnect();
