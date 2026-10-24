@@ -180,6 +180,8 @@ model Restaurant {
   serviceStates     ServiceState[]
   roomBookingBlocks RoomBookingBlock[]
   roomBookingRules  RoomBookingRule[]
+  notifications Notification[]
+  notificationEvents NotificationEvent[]
   integrationTokens IntegrationToken[]
   externalApiRequests ExternalApiRequest[]
   giftCardProducts GiftCardProduct[]
@@ -300,6 +302,8 @@ model RestaurantUser {
   refreshTokens RefreshToken[]
   auditLogs    AuditLog[]
   chatActivityLogs ChatActivityLog[]
+  notificationReads NotificationRead[]
+  attendedNotifications Notification[] @relation("NotificationAttendedBy")
 
   @@unique([restaurantId, email])
   @@index([restaurantId, role])
@@ -1027,4 +1031,53 @@ model GiftCardRedemption {
   giftCard      GiftCard   @relation(fields: [giftCardId], references: [id], onDelete: Cascade)
   restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   @@index([restaurantId, redeemedAt])
+}
+
+
+model Notification {
+  id String @id @default(cuid())
+  restaurantId String
+  type String @default("chat_order")
+  status String @default("pending")
+  activeKey String?
+  channelId String
+  chatId String
+  contactName String?
+  contactPhone String
+  orderMode String
+  summary String
+  occurredAt DateTime
+  attendedAt DateTime?
+  attendedByUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  attendedBy RestaurantUser? @relation("NotificationAttendedBy", fields: [attendedByUserId], references: [id], onDelete: SetNull)
+  reads NotificationRead[]
+  events NotificationEvent[]
+  @@unique([restaurantId, activeKey])
+  @@index([restaurantId, status, occurredAt])
+}
+
+model NotificationEvent {
+  id String @id @default(cuid())
+  restaurantId String
+  eventKey String
+  sourceMessageId String
+  notificationId String
+  createdAt DateTime @default(now())
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  @@unique([restaurantId, eventKey])
+  @@index([notificationId])
+}
+
+model NotificationRead {
+  notificationId String
+  userId String
+  readAt DateTime @default(now())
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user RestaurantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([notificationId, userId])
+  @@index([userId])
 }

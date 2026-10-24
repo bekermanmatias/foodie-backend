@@ -1,3 +1,4 @@
+import { NotificationsService, type ChatOrderInput } from "../notifications/notifications.service";
 import { Injectable } from "@nestjs/common";
 import { BadRequestException, ConflictException, ForbiddenException, HttpException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -35,8 +36,22 @@ export class IntegrationsService {
     private readonly prisma: PrismaService,
     private readonly reservationsService: ReservationsService,
     private readonly realtimeService: RealtimeService,
-    private readonly auditService: AuditService
+    private readonly auditService: AuditService,
+    private readonly notificationsService: NotificationsService
   ) {}
+
+  async receiveChatOrder(apiKey: string, input: ChatOrderInput) {
+    const token = await this.resolveToken(apiKey);
+    if (!token) throw new ForbiddenException("Invalid API key");
+    const restaurant = await this.prisma.restaurant.findFirst({ where: { id: token.restaurantId, isActive: true },
+      select: { chatPhoneNumberId: true, chatClientId: true } });
+    const channelId = restaurant?.chatPhoneNumberId || restaurant?.chatClientId;
+    if (!channelId || channelId !== input.channelId) throw new ForbiddenException("Channel does not belong to this restaurant");
+    if (input.chatId.replace(/\D/g, "") !== input.contactPhone.replace(/\D/g, "")) {
+      throw new ForbiddenException("Chat and contact do not match");
+    }
+    return this.notificationsService.receiveOrder(token.restaurantId, input);
+  }
 
   recentEvents() {
     return this.realtimeService.recent();

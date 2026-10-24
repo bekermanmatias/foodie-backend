@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Headers, Post, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Post, Query } from "@nestjs/common";
 import { IntegrationsService } from "./integrations.service";
 import { Public } from "../../common/auth/public.decorator";
+import { chatOrderSchema } from "../notifications/order-input";
 import { z } from "zod";
 import { preferredFeaturesSchema } from "../reservations/preferred-features";
 
@@ -124,6 +125,14 @@ const updateReservationSchema = z.object({
 @Controller()
 export class IntegrationsController {
   constructor(private readonly integrationsService: IntegrationsService) {}
+
+  @Public()
+  @Post("external/notifications/chat-orders")
+  chatOrder(@Headers("x-api-key") apiKey: string, @Body() body: unknown) {
+    const result = chatOrderSchema.safeParse(body);
+    if (!result.success) throw new BadRequestException("Datos del pedido inválidos");
+    return this.integrationsService.receiveChatOrder(apiKey, result.data);
+  }
 
   @Get("integrations/events")
   health() {

@@ -16,6 +16,7 @@ import { GiftCardsModule } from "./gift-cards/gift-cards.module";
 import { ChatTagStylesModule } from "./chat-tag-styles/chat-tag-styles.module";
 import { DepositsModule } from "./deposits/deposits.module";
 import { HealthController } from "../health.controller";
+import { NotificationsModule } from "./notifications/notifications.module";
 
 @Module({
   controllers: [HealthController],
@@ -35,6 +36,7 @@ import { HealthController } from "../health.controller";
     GiftCardsModule,
     ChatTagStylesModule,
     DepositsModule,
+    NotificationsModule,
     AuditModule
   ]
 })

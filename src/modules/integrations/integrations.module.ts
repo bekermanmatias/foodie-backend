@@ -1,3 +1,4 @@
+import { NotificationsModule } from "../notifications/notifications.module";
 import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { RealtimeModule } from "../realtime/realtime.module";
@@ -6,7 +7,7 @@ import { IntegrationsController } from "./integrations.controller";
 import { IntegrationsService } from "./integrations.service";
 
 @Module({
-  imports: [ReservationsModule, RealtimeModule, AuditModule],
+  imports: [NotificationsModule, ReservationsModule, RealtimeModule, AuditModule],
   controllers: [IntegrationsController],
   providers: [IntegrationsService]
 })
