@@ -122,6 +122,12 @@ enum GiftCardStatus {
   CANCELLED
 }
 
+enum GiftCardCheckoutStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
 enum AssistantUpdateCategory {
   menu
   hours
@@ -186,6 +192,7 @@ model Restaurant {
   externalApiRequests ExternalApiRequest[]
   giftCardProducts GiftCardProduct[]
   giftCardOrders GiftCardOrder[]
+  giftCardCheckouts GiftCardCheckout[]
   giftCards GiftCard[]
   giftCardRedemptions GiftCardRedemption[]
   auditLogs         AuditLog[]
@@ -967,7 +974,37 @@ model GiftCardProduct {
   updatedAt     DateTime           @updatedAt
   restaurant    Restaurant         @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   orders        GiftCardOrder[]
+  checkouts     GiftCardCheckout[]
   @@index([restaurantId, isActive])
+}
+
+model GiftCardCheckout {
+  id            String                 @id @default(cuid())
+  restaurantId  String
+  productId     String?
+  type          GiftCardProductType
+  quantity      Int
+  unitAmount    Decimal                @db.Decimal(12, 2)
+  totalAmount   Decimal                @db.Decimal(12, 2)
+  currency      String                 @default("ARS")
+  purchaserName String
+  purchaserPhone String
+  recipientName String?
+  message       String?
+  partySize     Int?
+  prepareKey    String?
+  requestHash   String?
+  productFingerprint String?
+  status        GiftCardCheckoutStatus @default(PENDING)
+  expiresAt     DateTime
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  restaurant    Restaurant             @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  product       GiftCardProduct?       @relation(fields: [productId], references: [id], onDelete: SetNull)
+  order         GiftCardOrder?
+
+  @@unique([restaurantId, prepareKey])
+  @@index([restaurantId, purchaserPhone, status, createdAt])
 }
 
 model GiftCardOrder {
@@ -981,6 +1018,9 @@ model GiftCardOrder {
   message            String?
   partySize          Int?
   amount             Decimal               @db.Decimal(12, 2)
+  unitAmount         Decimal               @db.Decimal(12, 2)
+  quantity           Int                   @default(1)
+  checkoutId         String?               @unique
   currency           String                @default("ARS")
   paymentMethod      String                @default("TRANSFER")
   paymentStatus      GiftCardPaymentStatus @default(PENDING)
@@ -994,7 +1034,8 @@ model GiftCardOrder {
   updatedAt          DateTime              @updatedAt
   restaurant         Restaurant            @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   product            GiftCardProduct?      @relation(fields: [productId], references: [id], onDelete: SetNull)
-  giftCard           GiftCard?
+  checkout           GiftCardCheckout?     @relation(fields: [checkoutId], references: [id], onDelete: SetNull)
+  giftCards          GiftCard[]
   @@index([restaurantId, status, createdAt])
   @@index([restaurantId, paymentStatus])
 }
@@ -1002,7 +1043,7 @@ model GiftCardOrder {
 model GiftCard {
   id             String                @id @default(cuid())
   restaurantId   String
-  orderId        String                @unique
+  orderId        String
   displayCode    String                @unique
   originalAmount Decimal               @db.Decimal(12, 2)
   currency       String                @default("ARS")
@@ -1012,11 +1053,14 @@ model GiftCard {
   imageUrl       String?
   pdfUrl         String?
   issuedAt       DateTime              @default(now())
+  sentAt         DateTime?
+  sentBy         String?
   redeemedAt     DateTime?
   createdAt      DateTime              @default(now())
   restaurant     Restaurant            @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   order          GiftCardOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
   redemptions    GiftCardRedemption[]
+  @@index([orderId])
   @@index([restaurantId, status, createdAt])
 }
 

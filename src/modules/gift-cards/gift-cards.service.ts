@@ -12,7 +12,7 @@ import { verifyPassword } from "../../common/security/password";
 import { createGiftCardCode } from "../../common/utils/code";
 
 type ProductInput = { name: string; type: GiftCardProductType; description: string; price?: number | null; minAmount?: number | null; maxAmount?: number | null; partySize?: number | null; currency?: string; validityDays: number; excludedDates?: string[]; restrictions?: Record<string, unknown> | null; paymentAlias?: string | null; paymentCbu?: string | null; paymentHolder?: string | null; isActive: boolean };
-type OrderInput = { productId?: string; type: GiftCardProductType; purchaserName: string; purchaserPhone: string; recipientName?: string | null; message?: string | null; partySize?: number | null; amount?: number; currency?: string };
+type OrderInput = { productId?: string; type: GiftCardProductType; purchaserName: string; purchaserPhone: string; recipientName?: string | null; message?: string | null; partySize?: number | null; amount?: number; currency?: string; quantity?: number };
 type OrderListQuery = { from?: string; to?: string; productId?: string; status?: string; paymentStatus?: string; giftCardStatus?: string; search?: string; page?: string; pageSize?: string };
 
 const money = (value: Prisma.Decimal | number) => Number(value);
@@ -174,115 +174,282 @@ export class GiftCardsService {
       ...(query.status ? { status: query.status as any } : {}),
       ...(query.paymentStatus ? { paymentStatus: query.paymentStatus as any } : {}),
       ...(query.productId === "__OPEN_AMOUNT__" ? { productId: null } : query.productId ? { productId: query.productId } : {}),
-      ...(query.giftCardStatus ? { giftCard: { is: { status: query.giftCardStatus as any } } } : {}),
+      ...(query.giftCardStatus ? { giftCards: { some: { status: query.giftCardStatus as any } } } : {}),
       ...((from || to) ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lt: to } : {}) } } : {}),
-      ...(search ? { OR: [{ id: search }, { purchaserName: { contains: search, mode: "insensitive" } }, { purchaserPhone: { contains: search } }, { recipientName: { contains: search, mode: "insensitive" } }, { product: { is: { name: { contains: search, mode: "insensitive" } } } }, { giftCard: { is: { displayCode: { contains: search, mode: "insensitive" } } } }] } : {}),
+      ...(search ? { OR: [{ id: search }, { purchaserName: { contains: search, mode: "insensitive" } }, { purchaserPhone: { contains: search } }, { recipientName: { contains: search, mode: "insensitive" } }, { product: { is: { name: { contains: search, mode: "insensitive" } } } }, { giftCards: { some: { displayCode: { contains: search, mode: "insensitive" } } } }] } : {}),
     };
     const [total, orders] = await Promise.all([
       this.prisma.giftCardOrder.count({ where }),
-      this.prisma.giftCardOrder.findMany({ where, include: { product: true, giftCard: true }, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.giftCardOrder.findMany({ where, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
     ]);
-    return { items: orders.map((order) => ({ id: order.id, purchaserName: order.purchaserName, purchaserPhone: order.purchaserPhone, recipientName: order.recipientName, message: order.message, type: order.type, partySize: order.partySize, amount: money(order.amount), currency: order.currency, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, status: order.status, paymentReference: order.paymentReference, paymentConfirmedAt: order.paymentConfirmedAt, sentAt: order.sentAt, createdAt: order.createdAt, product: order.product ? this.productView(order.product) : null, giftCard: order.giftCard ? this.giftCardView(order.giftCard) : null })), total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    return { items: orders.map((order) => ({ id: order.id, purchaserName: order.purchaserName, purchaserPhone: order.purchaserPhone, recipientName: order.recipientName, message: order.message, type: order.type, partySize: order.partySize, quantity: order.quantity, unitAmount: money(order.unitAmount), amount: money(order.amount), currency: order.currency, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, status: order.status, paymentReference: order.paymentReference, paymentConfirmedAt: order.paymentConfirmedAt, sentAt: order.sentAt, createdAt: order.createdAt, product: order.product ? this.productView(order.product) : null, giftCards: order.giftCards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && order.giftCards[0] ? this.giftCardView(order.giftCards[0]) : null })), total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }
 
   private absoluteAsset(value: string | null | undefined) { if (!value) return null; return value.startsWith("http") ? value : `${process.env.PUBLIC_API_ORIGIN || "http://localhost:4000"}${value}`; }
 
-  private giftCardView(card: any) { return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: this.absoluteAsset(card.imageUrl), pdfUrl: this.absoluteAsset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt }; }
+  private giftCardView(card: any) { return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: this.absoluteAsset(card.imageUrl), pdfUrl: this.absoluteAsset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt, sentAt: card.sentAt }; }
+
+  private async resolveOrder(restaurantId: string, input: OrderInput) {
+    const quantity = input.quantity ?? 1;
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) throw new ConflictException("La cantidad debe estar entre 1 y 20");
+    const product = input.productId ? await this.prisma.giftCardProduct.findFirst({ where: { id: input.productId, restaurantId, isActive: true } }) : null;
+    if (input.type === "FIXED_MENU" && !product) throw new NotFoundException("Gift Card product not found");
+    if (product && product.type !== input.type) throw new ConflictException("El tipo de Gift Card no coincide con el producto");
+    const unitAmount = input.type === "FIXED_MENU" ? Number(product!.price) : Number(input.amount);
+    if (!Number.isFinite(unitAmount) || unitAmount <= 0) throw new ConflictException("Invalid Gift Card amount");
+    if (input.type === "OPEN_AMOUNT" && product && ((product.minAmount && unitAmount < Number(product.minAmount)) || (product.maxAmount && unitAmount > Number(product.maxAmount)))) throw new ConflictException("Amount is outside product limits");
+    if (input.type === "FIXED_MENU" && input.partySize !== undefined && input.partySize !== product!.partySize) throw new ConflictException("Party size does not match product");
+    if (product && input.currency && input.currency !== product.currency) throw new ConflictException("La moneda no coincide con el producto");
+    return { product, quantity, unitAmount: new Prisma.Decimal(unitAmount), totalAmount: new Prisma.Decimal(unitAmount).mul(quantity), currency: product?.currency || input.currency || "ARS", partySize: input.partySize ?? product?.partySize ?? null };
+  }
+
+  private paymentInstructions(product: { paymentAlias: string | null; paymentCbu: string | null; paymentHolder: string | null } | null) {
+    return { alias: product?.paymentAlias || process.env.GIFT_CARD_TRANSFER_ALIAS || "Consultar al restaurante", cbu: product?.paymentCbu || process.env.GIFT_CARD_TRANSFER_CBU || null, holder: product?.paymentHolder || process.env.GIFT_CARD_TRANSFER_HOLDER || null };
+  }
+
+  private productFingerprint(product: any) {
+    return hashOpaqueToken(JSON.stringify({ name: product.name, type: product.type, description: product.description, price: product.price?.toString() ?? null, minAmount: product.minAmount?.toString() ?? null, maxAmount: product.maxAmount?.toString() ?? null, partySize: product.partySize, currency: product.currency, validityDays: product.validityDays, excludedDates: product.excludedDates, restrictions: product.restrictions, paymentAlias: product.paymentAlias, paymentCbu: product.paymentCbu, paymentHolder: product.paymentHolder, isActive: product.isActive }));
+  }
+
+  private orderCreatedView(order: { id: string; status: string; paymentMethod: string; amount: Prisma.Decimal; unitAmount: Prisma.Decimal; quantity: number; currency: string }, product: { paymentAlias: string | null; paymentCbu: string | null; paymentHolder: string | null } | null) {
+    return { order: { id: order.id, status: order.status, paymentMethod: order.paymentMethod, amount: money(order.amount), unitAmount: money(order.unitAmount), quantity: order.quantity, currency: order.currency, paymentInstructions: this.paymentInstructions(product) } };
+  }
 
   async createExternal(apiKey: string, input: OrderInput, idempotencyKey?: string) {
     const restaurantId = await this.externalRestaurant(apiKey);
-    if (idempotencyKey) { const existing = await this.prisma.externalApiRequest.findFirst({ where: { restaurantId, action: "gift_card.create_order", idempotencyKey } }); if (existing?.responseData) return existing.responseData; }
-    const product = input.productId ? await this.prisma.giftCardProduct.findFirst({ where: { id: input.productId, restaurantId, isActive: true } }) : null;
-    if (input.type === "FIXED_MENU" && !product) throw new NotFoundException("Gift Card product not found");
-    const amount = input.type === "FIXED_MENU" ? Number(product!.price) : Number(input.amount);
-    if (!Number.isFinite(amount) || amount <= 0) throw new ConflictException("Invalid Gift Card amount");
-    if (input.type === "OPEN_AMOUNT" && product && ((product.minAmount && amount < Number(product.minAmount)) || (product.maxAmount && amount > Number(product.maxAmount)))) throw new ConflictException("Amount is outside product limits");
-    if (input.type === "FIXED_MENU" && input.partySize !== undefined && input.partySize !== product!.partySize) throw new ConflictException("Party size does not match product");
-    const order = await this.prisma.giftCardOrder.create({ data: { restaurantId, productId: product?.id, type: input.type, purchaserName: input.purchaserName.trim(), purchaserPhone: input.purchaserPhone.trim(), recipientName: input.recipientName?.trim() || null, message: input.message?.trim() || null, partySize: input.partySize ?? product?.partySize ?? null, amount: new Prisma.Decimal(amount), currency: input.currency || product?.currency || "ARS" } });
-    const response = { order: { id: order.id, status: order.status, paymentMethod: order.paymentMethod, amount, currency: order.currency, paymentInstructions: { alias: product?.paymentAlias || process.env.GIFT_CARD_TRANSFER_ALIAS || "Consultar al restaurante", cbu: product?.paymentCbu || process.env.GIFT_CARD_TRANSFER_CBU || null, holder: product?.paymentHolder || process.env.GIFT_CARD_TRANSFER_HOLDER || null } } };
-    if (idempotencyKey) await this.prisma.externalApiRequest.create({ data: { restaurantId, integrationTokenId: (await this.prisma.integrationToken.findFirstOrThrow({ where: { restaurantId, isActive: true }, select: { id: true } })).id, action: "gift_card.create_order", idempotencyKey, requestHash: hashOpaqueToken(JSON.stringify(input)), status: "success", responseData: response } });
-    return response;
+    const requestHash = hashOpaqueToken(JSON.stringify(input));
+    if (idempotencyKey) {
+      const existing = await this.prisma.externalApiRequest.findFirst({ where: { restaurantId, action: "gift_card.create_order", idempotencyKey } });
+      if (existing) {
+        if (existing.requestHash !== requestHash) throw new ConflictException("La misma clave se usó para otra compra");
+        if (existing.responseData) return existing.responseData;
+      }
+    }
+    const resolved = await this.resolveOrder(restaurantId, input);
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const order = await tx.giftCardOrder.create({ data: { restaurantId, productId: resolved.product?.id, type: input.type, purchaserName: input.purchaserName.trim(), purchaserPhone: input.purchaserPhone.trim(), recipientName: input.recipientName?.trim() || null, message: input.message?.trim() || null, partySize: resolved.partySize, unitAmount: resolved.unitAmount, quantity: resolved.quantity, amount: resolved.totalAmount, currency: resolved.currency } });
+        const response = this.orderCreatedView(order, resolved.product);
+        if (idempotencyKey) {
+          const token = await tx.integrationToken.findFirstOrThrow({ where: { restaurantId, isActive: true }, select: { id: true } });
+          await tx.externalApiRequest.create({ data: { restaurantId, integrationTokenId: token.id, action: "gift_card.create_order", idempotencyKey, requestHash, status: "success", responseData: response } });
+        }
+        return response;
+      });
+    } catch (error) {
+      if (idempotencyKey && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const existing = await this.prisma.externalApiRequest.findFirst({ where: { restaurantId, action: "gift_card.create_order", idempotencyKey } });
+        if (existing?.requestHash === requestHash && existing.responseData) return existing.responseData;
+      }
+      throw error;
+    }
   }
 
-  async getExternal(apiKey: string, orderId: string) { const restaurantId = await this.externalRestaurant(apiKey); const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCard: true } }); if (!order) throw new NotFoundException("Gift Card order not found"); return { order: { id: order.id, status: order.status, paymentStatus: order.paymentStatus, amount: money(order.amount), currency: order.currency, giftCard: order.giftCard ? this.giftCardView(order.giftCard) : null } }; }
+  private checkoutView(checkout: any) {
+    return { id: checkout.id, status: checkout.status, productId: checkout.productId, productName: checkout.product?.name || null, productDescription: checkout.product?.description || null, validityDays: checkout.product?.validityDays ?? null, type: checkout.type, quantity: checkout.quantity, unitAmount: money(checkout.unitAmount), amount: money(checkout.totalAmount), currency: checkout.currency, purchaserName: checkout.purchaserName, purchaserPhone: checkout.purchaserPhone, expiresAt: checkout.expiresAt, orderId: checkout.order?.id || null };
+  }
+
+  async prepareExternal(apiKey: string, input: OrderInput, prepareKey?: string) {
+    const restaurantId = await this.externalRestaurant(apiKey);
+    if (!input.productId) throw new ConflictException("Seleccioná un producto real de Gift Card");
+    const requestHash = hashOpaqueToken(JSON.stringify(input));
+    if (prepareKey) {
+      const existing = await this.prisma.giftCardCheckout.findFirst({ where: { restaurantId, prepareKey }, include: { product: true, order: true } });
+      if (existing) {
+        if (existing.requestHash !== requestHash) throw new ConflictException("La misma clave se usó para otra compra");
+        return { checkout: this.checkoutView(existing) };
+      }
+    }
+    const resolved = await this.resolveOrder(restaurantId, input);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    try {
+      const checkout = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.giftCardCheckout.create({ data: { restaurantId, productId: resolved.product?.id, type: input.type, quantity: resolved.quantity, unitAmount: resolved.unitAmount, totalAmount: resolved.totalAmount, currency: resolved.currency, purchaserName: input.purchaserName.trim(), purchaserPhone: input.purchaserPhone.trim(), recipientName: input.recipientName?.trim() || null, message: input.message?.trim() || null, partySize: resolved.partySize, prepareKey, requestHash, productFingerprint: resolved.product ? this.productFingerprint(resolved.product) : null, expiresAt }, include: { product: true, order: true } });
+        await tx.giftCardCheckout.updateMany({ where: { restaurantId, purchaserPhone: input.purchaserPhone.trim(), status: "PENDING", id: { not: created.id } }, data: { status: "CANCELLED" } });
+        return created;
+      });
+      return { checkout: this.checkoutView(checkout) };
+    } catch (error) {
+      if (prepareKey && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const existing = await this.prisma.giftCardCheckout.findFirst({ where: { restaurantId, prepareKey }, include: { product: true, order: true } });
+        if (existing?.requestHash === requestHash) return { checkout: this.checkoutView(existing) };
+      }
+      throw error;
+    }
+  }
+
+  async pendingExternal(apiKey: string, phone: string) {
+    const restaurantId = await this.externalRestaurant(apiKey);
+    const checkout = await this.prisma.giftCardCheckout.findFirst({ where: { restaurantId, purchaserPhone: phone.trim(), status: "PENDING", expiresAt: { gt: new Date() } }, include: { product: true, order: true }, orderBy: { createdAt: "desc" } });
+    return { checkout: checkout ? this.checkoutView(checkout) : null };
+  }
+
+  async confirmExternal(apiKey: string, checkoutId: string, phone: string, idempotencyKey?: string) {
+    const restaurantId = await this.externalRestaurant(apiKey);
+    const requestHash = hashOpaqueToken(phone.trim());
+    if (idempotencyKey) {
+      const existing = await this.prisma.externalApiRequest.findFirst({ where: { restaurantId, action: "gift_card.confirm_checkout", idempotencyKey } });
+      if (existing) { if (existing.requestHash !== requestHash) throw new ConflictException("La misma clave se usó para otro comprador"); if (existing.responseData) return existing.responseData; }
+      const requote = await this.prisma.giftCardCheckout.findFirst({ where: { restaurantId, purchaserPhone: phone.trim(), prepareKey: `reprice-${idempotencyKey}` }, include: { product: true, order: true } });
+      if (requote) return { requiresReconfirmation: true, checkout: this.checkoutView(requote) };
+    }
+    const checkout = await this.prisma.giftCardCheckout.findFirst({ where: { id: checkoutId, restaurantId, purchaserPhone: phone.trim() }, include: { product: true, order: true } });
+    if (!checkout) throw new NotFoundException("Compra pendiente no encontrada");
+    if (checkout.status === "CONFIRMED" && checkout.order) return this.orderCreatedView(checkout.order, checkout.product);
+    if (checkout.status !== "PENDING" || checkout.expiresAt <= new Date()) throw new ConflictException({ code: "GIFT_CARD_CHECKOUT_EXPIRED", message: "La propuesta venció. Volvé a consultar el producto." });
+    const product = checkout.product;
+    if (!product?.isActive) throw new ConflictException({ code: "GIFT_CARD_PRODUCT_UNAVAILABLE", message: "El producto ya no está disponible." });
+    const currentAmount = checkout.type === "FIXED_MENU" ? Number(product.price) : money(checkout.unitAmount);
+    if (checkout.type !== product.type || product.currency !== checkout.currency) throw new ConflictException({ code: "GIFT_CARD_PRODUCT_CHANGED", message: "El producto cambió. Volvé a consultar el catálogo." });
+    if (checkout.type === "OPEN_AMOUNT" && ((product.minAmount && currentAmount < Number(product.minAmount)) || (product.maxAmount && currentAmount > Number(product.maxAmount)))) throw new ConflictException({ code: "GIFT_CARD_AMOUNT_CHANGED", message: "El importe ya no está disponible. Volvé a consultar el catálogo." });
+    if (currentAmount !== money(checkout.unitAmount) || (checkout.productFingerprint && checkout.productFingerprint !== this.productFingerprint(product))) {
+      const replacement = await this.prepareExternal(apiKey, { productId: product.id, type: checkout.type, quantity: checkout.quantity, purchaserName: checkout.purchaserName, purchaserPhone: checkout.purchaserPhone, recipientName: checkout.recipientName, message: checkout.message, partySize: checkout.partySize || undefined, amount: checkout.type === "OPEN_AMOUNT" ? money(checkout.unitAmount) : undefined, currency: checkout.currency }, idempotencyKey ? `reprice-${idempotencyKey}` : undefined);
+      return { requiresReconfirmation: true, checkout: replacement.checkout };
+    }
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.giftCardCheckout.updateMany({ where: { id: checkout.id, status: "PENDING", expiresAt: { gt: new Date() } }, data: { status: "CONFIRMED" } });
+        let order;
+        if (claimed.count !== 1) {
+          order = await tx.giftCardOrder.findUnique({ where: { checkoutId: checkout.id } });
+          if (!order) throw new ConflictException("La compra pendiente cambió. Intentá nuevamente.");
+        } else {
+          order = await tx.giftCardOrder.create({ data: { restaurantId, checkoutId: checkout.id, productId: checkout.productId, type: checkout.type, purchaserName: checkout.purchaserName, purchaserPhone: checkout.purchaserPhone, recipientName: checkout.recipientName, message: checkout.message, partySize: checkout.partySize, unitAmount: checkout.unitAmount, quantity: checkout.quantity, amount: checkout.totalAmount, currency: checkout.currency } });
+        }
+        const response = this.orderCreatedView(order, product);
+        if (idempotencyKey) {
+          const token = await tx.integrationToken.findFirstOrThrow({ where: { restaurantId, isActive: true }, select: { id: true } });
+          await tx.externalApiRequest.create({ data: { restaurantId, integrationTokenId: token.id, action: "gift_card.confirm_checkout", idempotencyKey, requestHash, status: "success", responseData: response } });
+        }
+        return response;
+      });
+    } catch (error) {
+      if (idempotencyKey && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const existing = await this.prisma.externalApiRequest.findFirst({ where: { restaurantId, action: "gift_card.confirm_checkout", idempotencyKey } });
+        if (existing?.requestHash === requestHash && existing.responseData) return existing.responseData;
+      }
+      throw error;
+    }
+  }
+
+  async getExternal(apiKey: string, orderId: string) { const restaurantId = await this.externalRestaurant(apiKey); const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { orderBy: { createdAt: "asc" } } } }); if (!order) throw new NotFoundException("Gift Card order not found"); return { order: { id: order.id, status: order.status, paymentStatus: order.paymentStatus, quantity: order.quantity, unitAmount: money(order.unitAmount), amount: money(order.amount), currency: order.currency, giftCards: order.giftCards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && order.giftCards[0] ? this.giftCardView(order.giftCards[0]) : null } }; }
 
   async confirmPayment(user: RequestUser, orderId: string, approved: boolean, reference?: string) {
     const restaurantId = this.owner(user);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, giftCard: true } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
-    if (order.paymentStatus === "CONFIRMED" && order.giftCard) return { order: order.id, giftCard: this.giftCardView(order.giftCard) };
-    if (!approved) { const rejected = await this.prisma.giftCardOrder.update({ where: { id: order.id }, data: { paymentStatus: "REJECTED", status: "CANCELLED", paymentReference: reference || null } }); await this.audit.log({ action: "gift_card.payment.rejected", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub }); return { order: rejected.id, status: rejected.status }; }
-    const displayCode = createGiftCardCode();
+    const issuedView = (cards: typeof order.giftCards) => ({ order: order.id, giftCards: cards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && cards[0] ? this.giftCardView(cards[0]) : null });
+    if (order.paymentStatus === "CONFIRMED" && order.giftCards.length === order.quantity) return issuedView(order.giftCards);
+    if (order.paymentStatus !== "PENDING") throw new ConflictException("La orden no admite una nueva confirmación de pago");
+    if (!approved) { const rejected = await this.prisma.giftCardOrder.updateMany({ where: { id: order.id, paymentStatus: "PENDING" }, data: { paymentStatus: "REJECTED", status: "CANCELLED", paymentReference: reference || null } }); if (rejected.count !== 1) throw new ConflictException("La orden cambió mientras se rechazaba el pago"); await this.audit.log({ action: "gift_card.payment.rejected", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub }); return { order: order.id, status: "CANCELLED" }; }
     const validFrom = new Date(); const validityDays = order.product?.validityDays || 180; const validUntil = new Date(validFrom); validUntil.setUTCDate(validUntil.getUTCDate() + validityDays);
-    const assets = await this.generateAssets(order, displayCode, validUntil);
-    const result = await this.prisma.$transaction(async (tx) => {
-      const updated = await tx.giftCardOrder.updateMany({ where: { id: order.id, paymentStatus: "PENDING", giftCard: null }, data: { paymentStatus: "CONFIRMED", status: "PAID", paymentReference: reference || null, paymentConfirmedAt: new Date(), paymentConfirmedBy: user.sub } });
-      if (updated.count !== 1) { const existing = await tx.giftCard.findUnique({ where: { orderId: order.id } }); if (existing) return existing; throw new ConflictException("Order payment state changed"); }
-      return tx.giftCard.create({ data: { restaurantId, orderId: order.id, displayCode, originalAmount: order.amount, currency: order.currency, validFrom, validUntil, imageUrl: assets.imageUrl, pdfUrl: assets.pdfUrl } });
-    });
-    await this.audit.log({ action: "gift_card.issued", targetType: "gift_card", targetId: result.id, restaurantId, restaurantUserId: user.sub, metadata: { orderId: order.id } });
-    return { order: order.id, giftCard: this.giftCardView(result) };
+    const generatedCodes: string[] = [];
+    let issued: typeof order.giftCards;
+    try {
+      issued = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.giftCardOrder.updateMany({ where: { id: order.id, paymentStatus: "PENDING", giftCards: { none: {} } }, data: { paymentStatus: "CONFIRMED", status: "PAID", paymentReference: reference || null, paymentConfirmedAt: new Date(), paymentConfirmedBy: user.sub } });
+        if (updated.count !== 1) {
+          const existing = await tx.giftCard.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
+          if (existing.length === order.quantity) return existing;
+          throw new ConflictException("Order payment state changed");
+        }
+        const cards: typeof order.giftCards = [];
+        for (let index = 0; index < order.quantity; index += 1) {
+          let displayCode = createGiftCardCode();
+          while (generatedCodes.includes(displayCode)) displayCode = createGiftCardCode();
+          generatedCodes.push(displayCode);
+          const assets = await this.generateAssets(order, displayCode, validUntil);
+          cards.push(await tx.giftCard.create({ data: { restaurantId, orderId: order.id, displayCode, originalAmount: order.unitAmount, currency: order.currency, validFrom, validUntil, imageUrl: assets.imageUrl, pdfUrl: assets.pdfUrl } }));
+        }
+        return cards;
+      }, { timeout: 180000 });
+    } catch (error) {
+      const directory = join(process.cwd(), "uploads", "gift-cards", restaurantId, order.id);
+      await Promise.all(generatedCodes.flatMap((code) => [rm(join(directory, `gift-card-${code}.png`), { force: true }), rm(join(directory, `gift-card-${code}.pdf`), { force: true })]));
+      throw error;
+    }
+    await this.audit.log({ action: "gift_card.issued", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { quantity: issued.length, cardIds: issued.map((card) => card.id) } });
+    return issuedView(issued);
   }
 
-  async sendGiftCard(user: RequestUser, orderId: string) {
+  async sendGiftCard(user: RequestUser, orderId: string, resend = false) {
     const restaurantId = this.owner(user);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCard: true, restaurant: { select: { chatPhoneNumberId: true } } } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { orderBy: { createdAt: "asc" } }, restaurant: { select: { chatPhoneNumberId: true } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
-    if (!order.giftCard) throw new ConflictException("La Gift Card todavía no está emitida");
-    if (order.giftCard.status !== GiftCardStatus.ACTIVE) throw new ConflictException("La Gift Card no está activa");
-    const imageUrl = this.absoluteAsset(order.giftCard.imageUrl);
-    if (!imageUrl) throw new ConflictException("La Gift Card no tiene imagen generada");
+    if (order.giftCards.length !== order.quantity) throw new ConflictException("La compra todavía no tiene todas las Gift Cards emitidas");
+    const activeCards = order.giftCards.filter((card) => card.status === GiftCardStatus.ACTIVE);
+    if (!activeCards.length || activeCards.some((card) => !card.imageUrl)) throw new ConflictException("No hay Gift Cards activas con imagen para enviar");
     const clientId = order.restaurant?.chatPhoneNumberId?.trim() || null;
     const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL || "https://n8n.pupuia.com/webhook/foodie-gift-card-enviar-v1";
     const webhookToken = process.env.N8N_WEBHOOK_TOKEN || "07092015Leyla@";
-    const caption = `¡Tu Gift Card está lista! Código: ${order.giftCard.displayCode}.`;
-    let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
-    try {
-      const response = await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-n8n-token": webhookToken }, body: JSON.stringify({ clientId, phoneNumber: order.purchaserPhone, imageUrl, caption, orderId: order.id, restaurantId, code: order.giftCard.displayCode }) });
-      result = (await response.json().catch(() => null)) as { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null;
-      if (!response.ok) throw new Error(`n8n respondió ${response.status}`);
-    } catch (error) {
-      await this.audit.log({ action: "gift_card.send.failed", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { error: error instanceof Error ? error.message : String(error) } });
-      throw new ConflictException("No se pudo contactar el servicio de envío de WhatsApp");
-    }
-    if (!result?.sent) {
-      await this.audit.log({ action: "gift_card.send.blocked", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null } });
-      return { sent: false, reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null };
+    const pending = resend ? activeCards : activeCards.filter((card) => !card.sentAt);
+    if (!pending.length) return { sent: true, sentCount: activeCards.length, totalCount: activeCards.length, reason: null };
+    for (const card of pending) {
+      let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
+      try {
+        const response = await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-n8n-token": webhookToken }, body: JSON.stringify({ clientId, phoneNumber: order.purchaserPhone, imageUrl: this.absoluteAsset(card.imageUrl), caption: `¡Tu Gift Card está lista! Código: ${card.displayCode}.`, orderId: order.id, restaurantId, code: card.displayCode }) });
+        result = (await response.json().catch(() => null)) as { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null;
+        if (!response.ok) throw new Error(`n8n respondió ${response.status}`);
+      } catch (error) {
+        await this.audit.log({ action: "gift_card.send.failed", targetType: "gift_card", targetId: card.id, restaurantId, restaurantUserId: user.sub, metadata: { error: error instanceof Error ? error.message : String(error) } });
+        return { sent: false, sentCount: await this.prisma.giftCard.count({ where: { orderId: order.id, status: GiftCardStatus.ACTIVE, sentAt: { not: null } } }), totalCount: activeCards.length, reason: "SEND_FAILED" };
+      }
+      if (!result?.sent) {
+        await this.audit.log({ action: "gift_card.send.blocked", targetType: "gift_card", targetId: card.id, restaurantId, restaurantUserId: user.sub, metadata: { reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null } });
+        return { sent: false, sentCount: await this.prisma.giftCard.count({ where: { orderId: order.id, status: GiftCardStatus.ACTIVE, sentAt: { not: null } } }), totalCount: activeCards.length, reason: result?.reason || "NOT_SENT", lastInboundAt: result?.lastInboundAt || null };
+      }
+      await this.prisma.giftCard.update({ where: { id: card.id }, data: { sentAt: new Date(), sentBy: user.sub } });
+      await this.audit.log({ action: "gift_card.sent", targetType: "gift_card", targetId: card.id, restaurantId, restaurantUserId: user.sub, metadata: { channel: "whatsapp", clientId, orderId: order.id } });
     }
     const sentAt = new Date();
     await this.prisma.giftCardOrder.update({ where: { id: order.id }, data: { sentAt, sentBy: user.sub } });
-    await this.audit.log({ action: "gift_card.sent", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { channel: "whatsapp", clientId } });
-    return { sent: true, sentAt, reason: null };
+    return { sent: true, sentAt, sentCount: activeCards.length, totalCount: activeCards.length, reason: null };
   }
 
   async cancelOrder(user: RequestUser, orderId: string) {
     const restaurantId = this.owner(user);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCard: { include: { redemptions: { select: { id: true }, take: 1 } } } } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { include: { redemptions: { select: { id: true }, take: 1 } } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     if (order.status === "CANCELLED") throw new ConflictException("La orden ya está cancelada");
     if (!["PENDING_PAYMENT", "PAID"].includes(order.status)) throw new ConflictException("La orden no puede cancelarse en su estado actual");
-    if (order.giftCard && (order.giftCard.status !== GiftCardStatus.ACTIVE || order.giftCard.redemptions.length > 0)) {
+    if (order.giftCards.some((card) => (card.status !== GiftCardStatus.ACTIVE && card.status !== GiftCardStatus.CANCELLED) || card.redemptions.length > 0)) {
       throw new ConflictException("La Gift Card ya fue canjeada o no está activa");
     }
 
     const cancelled = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.giftCardOrder.updateMany({ where: { id: order.id, restaurantId, status: { in: ["PENDING_PAYMENT", "PAID"] } }, data: { status: "CANCELLED" } });
       if (updated.count !== 1) throw new ConflictException("La orden cambió mientras se cancelaba");
-      if (order.giftCard) await tx.giftCard.updateMany({ where: { id: order.giftCard.id, status: "ACTIVE" }, data: { status: GiftCardStatus.CANCELLED } });
+      const activeCount = order.giftCards.filter((card) => card.status === GiftCardStatus.ACTIVE).length;
+      if (activeCount) { const cards = await tx.giftCard.updateMany({ where: { orderId: order.id, status: "ACTIVE" }, data: { status: GiftCardStatus.CANCELLED } }); if (cards.count !== activeCount) throw new ConflictException("Una Gift Card cambió mientras se cancelaba"); }
       return tx.giftCardOrder.findUniqueOrThrow({ where: { id: order.id } });
     });
-    await this.audit.log({ action: "gift_card.order.cancelled", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { hadGiftCard: Boolean(order.giftCard) } });
+    await this.audit.log({ action: "gift_card.order.cancelled", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { cardCount: order.giftCards.length } });
     return { id: cancelled.id, status: cancelled.status };
+  }
+
+  async cancelCard(user: RequestUser, cardId: string) {
+    const restaurantId = this.owner(user);
+    const card = await this.prisma.giftCard.findFirst({ where: { id: cardId, restaurantId }, include: { order: true, redemptions: { select: { id: true }, take: 1 } } });
+    if (!card) throw new NotFoundException("Gift Card not found");
+    if (card.order.status !== "PAID" || card.status !== GiftCardStatus.ACTIVE || card.redemptions.length) throw new ConflictException("La Gift Card no se puede cancelar");
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.giftCard.updateMany({ where: { id: card.id, status: GiftCardStatus.ACTIVE }, data: { status: GiftCardStatus.CANCELLED } });
+      if (updated.count !== 1) throw new ConflictException("La Gift Card cambió mientras se cancelaba");
+      const active = await tx.giftCard.count({ where: { orderId: card.orderId, status: { not: GiftCardStatus.CANCELLED } } });
+      if (active === 0) await tx.giftCardOrder.update({ where: { id: card.orderId }, data: { status: "CANCELLED" } });
+    });
+    await this.audit.log({ action: "gift_card.cancelled", targetType: "gift_card", targetId: card.id, restaurantId, restaurantUserId: user.sub, metadata: { orderId: card.orderId } });
+    return { id: card.id, status: GiftCardStatus.CANCELLED };
   }
 
   async deleteOrder(user: RequestUser, orderId: string) {
     const restaurantId = this.owner(user);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCard: { include: { redemptions: { select: { id: true } } } } } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { include: { redemptions: { select: { id: true } } } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
 
     await this.prisma.giftCardOrder.delete({ where: { id: order.id } });
     await rm(join(process.cwd(), "uploads", "gift-cards", restaurantId, order.id), { recursive: true, force: true });
-    await this.audit.log({ action: "gift_card.order.deleted", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { orderStatus: order.status, giftCardStatus: order.giftCard?.status || null, redemptionCount: order.giftCard?.redemptions.length || 0 } });
+    await this.audit.log({ action: "gift_card.order.deleted", targetType: "gift_card_order", targetId: order.id, restaurantId, restaurantUserId: user.sub, metadata: { orderStatus: order.status, cardCount: order.giftCards.length, redemptionCount: order.giftCards.reduce((total, card) => total + card.redemptions.length, 0) } });
     return { id: order.id, deleted: true };
   }
 
@@ -291,7 +458,7 @@ export class GiftCardsService {
     if (!card) throw new NotFoundException("Gift Card not found");
     if (card.status !== "ACTIVE") throw new ConflictException("Gift Card is not active");
     if (card.validUntil < new Date()) { await this.prisma.giftCard.update({ where: { id: card.id }, data: { status: "EXPIRED" } }); throw new ConflictException("Gift Card expired"); }
-    const redeemed = await this.prisma.$transaction(async (tx) => { const locked = await tx.giftCard.updateMany({ where: { id: card.id, status: "ACTIVE" }, data: { status: "REDEEMED", redeemedAt: new Date() } }); if (locked.count !== 1) throw new ConflictException("Gift Card already redeemed"); await tx.giftCardOrder.update({ where: { id: card.orderId }, data: { status: "REDEEMED" } }); await tx.giftCardRedemption.create({ data: { giftCardId: card.id, restaurantId, redeemedBy: user.sub, reservationId: input.reservationId, notes: input.notes } }); return tx.giftCard.findUniqueOrThrow({ where: { id: card.id } }); });
+    const redeemed = await this.prisma.$transaction(async (tx) => { const locked = await tx.giftCard.updateMany({ where: { id: card.id, status: "ACTIVE" }, data: { status: "REDEEMED", redeemedAt: new Date() } }); if (locked.count !== 1) throw new ConflictException("Gift Card already redeemed"); await tx.giftCardRedemption.create({ data: { giftCardId: card.id, restaurantId, redeemedBy: user.sub, reservationId: input.reservationId, notes: input.notes } }); const remaining = await tx.giftCard.count({ where: { orderId: card.orderId, status: { not: "REDEEMED" } } }); if (remaining === 0) await tx.giftCardOrder.update({ where: { id: card.orderId }, data: { status: "REDEEMED" } }); return tx.giftCard.findUniqueOrThrow({ where: { id: card.id } }); });
     await this.audit.log({ action: "gift_card.redeemed", targetType: "gift_card", targetId: card.id, restaurantId, restaurantUserId: user.sub, metadata: { reservationId: input.reservationId || null } });
     return this.giftCardView(redeemed);
   }
@@ -299,7 +466,7 @@ export class GiftCardsService {
   private async renderGiftCard(order: any, code: string, validUntil: Date) {
     const assetsDirectory = join(process.cwd(), "assets"); const templatePath = join(assetsDirectory, "gift-card-template.png");
     process.env.FONTCONFIG_FILE ??= join(assetsDirectory, "fonts", "fonts.conf"); process.env.XDG_CACHE_HOME ??= join(process.cwd(), "uploads", ".cache"); await mkdir(join(process.env.XDG_CACHE_HOME, "fontconfig"), { recursive: true });
-    const value = order.type === "FIXED_MENU" ? order.product?.name || "Gift Card" : displayAmount(order.amount, order.currency);
+    const value = order.type === "FIXED_MENU" ? order.product?.name || "Gift Card" : displayAmount(order.unitAmount ?? order.amount, order.currency);
     const includeDescriptionInPrint = order.product?.restrictions?.includeDescriptionInPrint === true;
     const description = includeDescriptionInPrint ? order.product?.description?.trim() : undefined;
     const date = displayDate(validUntil); const flow = giftCardFlow(value, order.type, description);

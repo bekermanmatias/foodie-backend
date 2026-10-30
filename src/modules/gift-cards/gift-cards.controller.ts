@@ -16,7 +16,7 @@ const orderSchema = z.preprocess((value) => {
     purchaserName: input.purchaserName || input.fullName,
     purchaserPhone: input.purchaserPhone || input.phone
   };
-}, z.object({ productId: z.string().optional(), type: z.enum(["FIXED_MENU", "OPEN_AMOUNT"]), purchaserName: z.string().trim().min(2).max(160), purchaserPhone: z.string().trim().min(5).max(40), recipientName: z.string().trim().max(160).nullable().optional(), message: z.string().trim().max(1000).nullable().optional(), partySize: z.number().int().positive().nullable().optional(), amount: z.number().positive().optional(), currency: z.string().trim().length(3).optional() }));
+}, z.object({ productId: z.string().optional(), type: z.enum(["FIXED_MENU", "OPEN_AMOUNT"]), purchaserName: z.string().trim().min(2).max(160), purchaserPhone: z.string().trim().min(5).max(40), recipientName: z.string().trim().max(160).nullable().optional(), message: z.string().trim().max(1000).nullable().optional(), partySize: z.number().int().positive().nullable().optional(), amount: z.number().positive().optional(), currency: z.string().trim().length(3).optional(), quantity: z.number().int().min(1).max(20).default(1) }));
 
 function parseOrder(body: unknown) {
   try { return orderSchema.parse(body); }
@@ -42,9 +42,11 @@ export class GiftCardsController {
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/orders/:id/payment") payment(@CurrentUser() user: RequestUser, @Param("id") id: string, @Body() body: { approved?: boolean; reference?: string }) { return this.service.confirmPayment(user, id, body.approved === true, body.reference); }
   @Roles("restaurant_owner")
-  @Post("restaurant/gift-cards/orders/:id/send") send(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.sendGiftCard(user, id); }
+  @Post("restaurant/gift-cards/orders/:id/send") send(@CurrentUser() user: RequestUser, @Param("id") id: string, @Body() body: { resend?: boolean } = {}) { return this.service.sendGiftCard(user, id, body?.resend === true); }
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/orders/:id/cancel") cancel(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.cancelOrder(user, id); }
+  @Roles("restaurant_owner")
+  @Post("restaurant/gift-cards/cards/:id/cancel") cancelCard(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.cancelCard(user, id); }
   @Roles("restaurant_owner")
   @Delete("restaurant/gift-cards/orders/:id") delete(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.deleteOrder(user, id); }
   @Roles("restaurant_owner", "host", "events")
@@ -54,6 +56,12 @@ export class GiftCardsController {
   @Get("external/gift-cards/products") externalProducts(@Headers("x-api-key") apiKey: string) { return this.service.listExternalProducts(apiKey); }
   @Public()
   @Post("external/gift-cards/orders") externalCreate(@Headers("x-api-key") apiKey: string, @Headers("idempotency-key") idempotencyKey: string | undefined, @Body() body: unknown) { return this.service.createExternal(apiKey, parseOrder(body), idempotencyKey); }
+  @Public()
+  @Post("external/gift-cards/checkouts") externalPrepare(@Headers("x-api-key") apiKey: string, @Headers("idempotency-key") idempotencyKey: string | undefined, @Body() body: unknown) { return this.service.prepareExternal(apiKey, parseOrder(body), idempotencyKey); }
+  @Public()
+  @Get("external/gift-cards/checkouts/pending") externalPending(@Headers("x-api-key") apiKey: string, @Query("phone") phone: string) { if (!phone?.trim()) throw new BadRequestException("Falta el teléfono"); return this.service.pendingExternal(apiKey, phone); }
+  @Public()
+  @Post("external/gift-cards/checkouts/:id/confirm") externalConfirm(@Headers("x-api-key") apiKey: string, @Headers("idempotency-key") idempotencyKey: string | undefined, @Param("id") id: string, @Body() body: { purchaserPhone?: string }) { if (!body?.purchaserPhone?.trim()) throw new BadRequestException("Falta el teléfono"); return this.service.confirmExternal(apiKey, id, body.purchaserPhone, idempotencyKey); }
   @Public()
   @Get("external/gift-cards/orders/:id") externalGet(@Headers("x-api-key") apiKey: string, @Param("id") id: string) { return this.service.getExternal(apiKey, id); }
 }
