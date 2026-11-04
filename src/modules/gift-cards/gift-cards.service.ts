@@ -1,3 +1,4 @@
+import { restaurantWebhook, n8nWebhookToken } from "../../common/restaurant-webhooks";
 import { requireFeature, requireExternalAccess } from "../../common/restaurant-features";
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, GiftCardProductType, GiftCardStatus } from "@prisma/client";
@@ -386,8 +387,8 @@ export class GiftCardsService {
     const activeCards = order.giftCards.filter((card) => card.status === GiftCardStatus.ACTIVE);
     if (!activeCards.length || activeCards.some((card) => !card.imageUrl)) throw new ConflictException("No hay Gift Cards activas con imagen para enviar");
     const clientId = order.restaurant?.chatPhoneNumberId?.trim() || null;
-    const webhookUrl = process.env.N8N_GIFT_CARD_SEND_WEBHOOK_URL || "https://n8n.pupuia.com/webhook/foodie-gift-card-enviar-v1";
-    const webhookToken = process.env.N8N_WEBHOOK_TOKEN || "07092015Leyla@";
+    const webhookUrl = restaurantWebhook("giftCard", clientId)!;
+    const webhookToken = n8nWebhookToken();
     const pending = resend ? activeCards : activeCards.filter((card) => !card.sentAt);
     if (!pending.length) return { sent: true, sentCount: activeCards.length, totalCount: activeCards.length, reason: null };
     for (const card of pending) {

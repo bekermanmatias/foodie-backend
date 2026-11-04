@@ -1,3 +1,4 @@
+import { restaurantWebhook, n8nWebhookToken } from "../../common/restaurant-webhooks";
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
@@ -172,8 +173,9 @@ export class DepositsService {
     if (delivery.status === "sent" || delivery.status === "simulated") return delivery;
     if ((await restaurantFeatures(this.prisma, restaurantId)).isDemo) return this.prisma.depositDelivery.update({ where: { id: delivery.id }, data: { status: "simulated", sentAt: new Date(), error: null } });
     await requireExternalAccess(this.prisma, restaurantId);
-    const url = process.env.N8N_DEPOSIT_CONFIRMATION_WEBHOOK_URL;
-    const token = process.env.N8N_WEBHOOK_TOKEN;
+    const restaurant = await this.prisma.restaurant.findUniqueOrThrow({ where: { id: restaurantId }, select: { chatPhoneNumberId: true } });
+    const url = restaurantWebhook("depositConfirmation", restaurant.chatPhoneNumberId);
+    const token = n8nWebhookToken();
     if (!url || !token) throw new ConflictException("Falta configurar el envío de confirmaciones de señas");
     const claimed = await this.prisma.depositDelivery.updateMany({ where: { id: delivery.id, status: { in: ["pending", "failed"] } }, data: { status: "sending", attempts: { increment: 1 }, error: null } });
     if (!claimed.count) throw new ConflictException("El envío está en proceso o requiere verificar el resultado anterior");
