@@ -97,7 +97,7 @@ export class AuthService {
       restaurantId: user.restaurantId
     }, sessionMeta);
 
-    const chatSession = await this.loginToChat(user.restaurant.chatAuthEmail, user.restaurant.chatAuthSecret);
+    const chatSession = user.restaurant.isDemo ? null : await this.loginToChat(user.restaurant.chatAuthEmail, user.restaurant.chatAuthSecret);
 
     return {
       ...issued,

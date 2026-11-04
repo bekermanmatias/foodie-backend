@@ -1,3 +1,4 @@
+import { requireExternalAccess } from "../../common/restaurant-features";
 import { NotificationsService, type ChatOrderInput } from "../notifications/notifications.service";
 import { Injectable } from "@nestjs/common";
 import { BadRequestException, ConflictException, ForbiddenException, HttpException } from "@nestjs/common";
@@ -865,6 +866,7 @@ export class IntegrationsService {
         throw new ForbiddenException("Restaurant not found for global API key");
       }
 
+      await requireExternalAccess(this.prisma, restaurantId);
       const tokenHash = hashOpaqueToken(apiKey);
       const token = await this.prisma.integrationToken.upsert({
         where: {
@@ -900,6 +902,7 @@ export class IntegrationsService {
       if (restaurantId && directMatch.restaurantId !== restaurantId) {
         throw new ForbiddenException("API key does not belong to requested restaurant");
       }
+      await requireExternalAccess(this.prisma, directMatch.restaurantId);
       return { id: directMatch.id, restaurantId: directMatch.restaurantId, isGlobal: false };
     }
 
@@ -913,6 +916,7 @@ export class IntegrationsService {
     if (restaurantId && legacyToken.restaurantId !== restaurantId) {
       throw new ForbiddenException("API key does not belong to requested restaurant");
     }
+    await requireExternalAccess(this.prisma, legacyToken.restaurantId);
     return { id: legacyToken.id, restaurantId: legacyToken.restaurantId, isGlobal: false };
   }
 

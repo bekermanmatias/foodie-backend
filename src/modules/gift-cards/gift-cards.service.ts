@@ -1,3 +1,4 @@
+import { requireFeature, requireExternalAccess } from "../../common/restaurant-features";
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, GiftCardProductType, GiftCardStatus } from "@prisma/client";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -99,23 +100,27 @@ async function rotateTextBlock(svg: string, width: number, height: number, cente
 export class GiftCardsService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
-  private owner(user: RequestUser) {
+  private async owner(user: RequestUser) {
     if (user.scope !== "restaurant" || user.role !== "restaurant_owner" || !user.restaurantId) throw new ForbiddenException("Solo el dueño puede administrar Gift Cards");
+    await requireFeature(this.prisma, user.restaurantId, "giftCards");
     return user.restaurantId;
   }
 
-  private giftCardStaff(user: RequestUser, action: string) {
+  private async giftCardStaff(user: RequestUser, action: string) {
     if (user.scope !== "restaurant" || !user.restaurantId || !["restaurant_owner", "host", "events"].includes(user.role)) throw new ForbiddenException(`Solo el dueño, recepción o eventos pueden ${action}`);
+    await requireFeature(this.prisma, user.restaurantId, "giftCards");
     return user.restaurantId;
   }
 
   private async externalRestaurant(apiKey: string) {
     if (!apiKey) throw new ForbiddenException("Invalid API key");
     const direct = await this.prisma.integrationToken.findFirst({ where: { tokenHash: hashOpaqueToken(apiKey), isActive: true } });
-    if (direct) return direct.restaurantId;
+    if (direct) { await requireExternalAccess(this.prisma, direct.restaurantId); await requireFeature(this.prisma, direct.restaurantId, "giftCards"); return direct.restaurantId; }
     const candidates = await this.prisma.integrationToken.findMany({ where: { isActive: true } });
     const legacy = candidates.find((candidate) => verifyPassword(apiKey, candidate.tokenHash));
     if (!legacy) throw new ForbiddenException("Invalid API key");
+    await requireExternalAccess(this.prisma, legacy.restaurantId);
+    await requireFeature(this.prisma, legacy.restaurantId, "giftCards");
     return legacy.restaurantId;
   }
 
@@ -123,12 +128,12 @@ export class GiftCardsService {
     return { id: product.id, name: product.name, type: product.type, description: product.description, price: product.price == null ? null : money(product.price), minAmount: product.minAmount == null ? null : money(product.minAmount), maxAmount: product.maxAmount == null ? null : money(product.maxAmount), partySize: product.partySize, currency: product.currency, validityDays: product.validityDays, excludedDates: product.excludedDates, restrictions: product.restrictions, paymentAlias: product.paymentAlias, paymentCbu: product.paymentCbu, paymentHolder: product.paymentHolder, isActive: product.isActive, createdAt: product.createdAt, updatedAt: product.updatedAt };
   }
 
-  async listProducts(user: RequestUser) { const restaurantId = this.giftCardStaff(user, "ver las Gift Cards"); return (await this.prisma.giftCardProduct.findMany({ where: { restaurantId }, orderBy: [{ isActive: "desc" }, { createdAt: "desc" }] })).map((item) => this.productView(item)); }
+  async listProducts(user: RequestUser) { const restaurantId = await this.giftCardStaff(user, "ver las Gift Cards"); return (await this.prisma.giftCardProduct.findMany({ where: { restaurantId }, orderBy: [{ isActive: "desc" }, { createdAt: "desc" }] })).map((item) => this.productView(item)); }
 
   async listExternalProducts(apiKey: string) { const restaurantId = await this.externalRestaurant(apiKey); return { products: (await this.prisma.giftCardProduct.findMany({ where: { restaurantId, isActive: true }, orderBy: { createdAt: "asc" } })).map((item) => this.productView(item)) }; }
 
   async saveProduct(user: RequestUser, productId: string | undefined, input: ProductInput) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     this.validateProduct(input);
     const data = { name: input.name.trim(), type: input.type, description: input.description.trim(), price: input.price == null ? null : new Prisma.Decimal(input.price), minAmount: input.minAmount == null ? null : new Prisma.Decimal(input.minAmount), maxAmount: input.maxAmount == null ? null : new Prisma.Decimal(input.maxAmount), partySize: input.partySize ?? null, currency: input.currency || "ARS", validityDays: input.validityDays, excludedDates: input.excludedDates || [], restrictions: input.restrictions as Prisma.InputJsonValue | undefined, paymentAlias: input.paymentAlias?.trim() || null, paymentCbu: input.paymentCbu?.trim() || null, paymentHolder: input.paymentHolder?.trim() || null, isActive: input.isActive };
     const product = productId ? await this.prisma.giftCardProduct.update({ where: { id: productId, restaurantId }, data }) : await this.prisma.giftCardProduct.create({ data: { restaurantId, ...data } });
@@ -137,13 +142,13 @@ export class GiftCardsService {
   }
 
   async deleteProduct(user: RequestUser, productId: string) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     await this.prisma.giftCardProduct.update({ where: { id: productId, restaurantId }, data: { isActive: false } });
     return { success: true };
   }
 
   async previewProduct(user: RequestUser, input: ProductInput) {
-    this.owner(user);
+    await this.owner(user);
     this.validateProduct(input);
     const validUntil = new Date();
     validUntil.setUTCDate(validUntil.getUTCDate() + input.validityDays);
@@ -161,7 +166,7 @@ export class GiftCardsService {
   }
 
   async listOrders(user: RequestUser, query: OrderListQuery = {}) {
-    const restaurantId = this.giftCardStaff(user, "ver las Gift Cards");
+    const restaurantId = await this.giftCardStaff(user, "ver las Gift Cards");
     const page = Math.max(1, Number.parseInt(query.page || "1", 10) || 1);
     const pageSize = Math.min(100, Math.max(1, Number.parseInt(query.pageSize || "10", 10) || 10));
     const search = query.search?.trim();
@@ -335,7 +340,7 @@ export class GiftCardsService {
   async getExternal(apiKey: string, orderId: string) { const restaurantId = await this.externalRestaurant(apiKey); const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { orderBy: { createdAt: "asc" } } } }); if (!order) throw new NotFoundException("Gift Card order not found"); return { order: { id: order.id, status: order.status, paymentStatus: order.paymentStatus, quantity: order.quantity, unitAmount: money(order.unitAmount), amount: money(order.amount), currency: order.currency, giftCards: order.giftCards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && order.giftCards[0] ? this.giftCardView(order.giftCards[0]) : null } }; }
 
   async confirmPayment(user: RequestUser, orderId: string, approved: boolean, reference?: string) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     const issuedView = (cards: typeof order.giftCards) => ({ order: order.id, giftCards: cards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && cards[0] ? this.giftCardView(cards[0]) : null });
@@ -373,7 +378,8 @@ export class GiftCardsService {
   }
 
   async sendGiftCard(user: RequestUser, orderId: string, resend = false) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
+    await requireExternalAccess(this.prisma, restaurantId);
     const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { orderBy: { createdAt: "asc" } }, restaurant: { select: { chatPhoneNumberId: true } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     if (order.giftCards.length !== order.quantity) throw new ConflictException("La compra todavía no tiene todas las Gift Cards emitidas");
@@ -407,7 +413,7 @@ export class GiftCardsService {
   }
 
   async cancelOrder(user: RequestUser, orderId: string) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { include: { redemptions: { select: { id: true }, take: 1 } } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     if (order.status === "CANCELLED") throw new ConflictException("La orden ya está cancelada");
@@ -428,7 +434,7 @@ export class GiftCardsService {
   }
 
   async cancelCard(user: RequestUser, cardId: string) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     const card = await this.prisma.giftCard.findFirst({ where: { id: cardId, restaurantId }, include: { order: true, redemptions: { select: { id: true }, take: 1 } } });
     if (!card) throw new NotFoundException("Gift Card not found");
     if (card.order.status !== "PAID" || card.status !== GiftCardStatus.ACTIVE || card.redemptions.length) throw new ConflictException("La Gift Card no se puede cancelar");
@@ -443,7 +449,7 @@ export class GiftCardsService {
   }
 
   async deleteOrder(user: RequestUser, orderId: string) {
-    const restaurantId = this.owner(user);
+    const restaurantId = await this.owner(user);
     const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { include: { redemptions: { select: { id: true } } } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
 
@@ -454,7 +460,7 @@ export class GiftCardsService {
   }
 
   async redeem(user: RequestUser, input: { code?: string; notes?: string; reservationId?: string }) {
-    const restaurantId = this.giftCardStaff(user, "canjear Gift Cards"); const code = input.code?.trim(); if (!code) throw new ConflictException("Gift Card code is required"); const card = await this.prisma.giftCard.findFirst({ where: { restaurantId, displayCode: code }, include: { order: true } });
+    const restaurantId = await this.giftCardStaff(user, "canjear Gift Cards"); const code = input.code?.trim(); if (!code) throw new ConflictException("Gift Card code is required"); const card = await this.prisma.giftCard.findFirst({ where: { restaurantId, displayCode: code }, include: { order: true } });
     if (!card) throw new NotFoundException("Gift Card not found");
     if (card.status !== "ACTIVE") throw new ConflictException("Gift Card is not active");
     if (card.validUntil < new Date()) { await this.prisma.giftCard.update({ where: { id: card.id }, data: { status: "EXPIRED" } }); throw new ConflictException("Gift Card expired"); }

@@ -1,3 +1,4 @@
+import { resolveFeatures, requireExternalAccess } from "../../common/restaurant-features";
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
@@ -108,14 +109,16 @@ export class RestaurantsService {
     };
   }
 
-  bootstrap(user: RequestUser) {
+  async bootstrap(user: RequestUser) {
     if (user.scope !== "restaurant" || !user.restaurantId) {
       throw new ForbiddenException("Restaurant context required");
     }
 
-    return this.prisma.restaurant.findUnique({
+    const restaurant = await this.prisma.restaurant.findUnique({
       where: { id: user.restaurantId },
       select: {
+        isDemo: true,
+        featureOverrides: true,
         id: true,
         name: true,
         slug: true,
@@ -134,6 +137,9 @@ export class RestaurantsService {
         }
       }
     });
+    if (!restaurant) throw new NotFoundException("Restaurante no encontrado");
+    const { featureOverrides, ...data } = restaurant;
+    return { ...data, features: resolveFeatures(featureOverrides) };
   }
 
   async onboarding(
@@ -489,6 +495,7 @@ export class RestaurantsService {
     input: { email: string; password: string },
     actor: RequestUser
   ) {
+    await requireExternalAccess(this.prisma, restaurantId);
     const restaurant = await this.prisma.restaurant.findUnique({ where: { id: restaurantId } });
     if (!restaurant) throw new NotFoundException("Restaurant not found");
 

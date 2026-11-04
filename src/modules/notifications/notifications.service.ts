@@ -1,3 +1,4 @@
+import { requireFeature } from "../../common/restaurant-features";
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { RequestUser } from "../../common/auth/request-user";
 import { PrismaService } from "../prisma/prisma.service";
@@ -18,14 +19,16 @@ export type ChatOrderInput = {
 export class NotificationsService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
-  private restaurantId(user: RequestUser) {
+  private async restaurantId(user: RequestUser) {
     if (user.scope !== "restaurant" || !user.restaurantId || !["restaurant_owner", "restaurant_manager", "host"].includes(user.role)) {
       throw new ForbiddenException("No tenés permiso para acceder a las notificaciones");
     }
+    await requireFeature(this.prisma, user.restaurantId, "notifications");
     return user.restaurantId;
   }
 
   async receiveOrder(restaurantId: string, input: ChatOrderInput) {
+    await requireFeature(this.prisma, restaurantId, "notifications");
     const eventKey = JSON.stringify([input.channelId, input.chatId, input.sourceMessageId]);
     return this.prisma.$transaction(async (tx) => {
       // Serialize incoming events and attention changes for the same conversation.
@@ -53,7 +56,7 @@ export class NotificationsService {
   }
 
   async list(user: RequestUser, input: { status?: "pending" | "attended"; unread?: boolean; page: number; pageSize: number }) {
-    const restaurantId = this.restaurantId(user);
+    const restaurantId = await this.restaurantId(user);
     const where = {
       restaurantId,
       deletedAt: null,
@@ -70,7 +73,7 @@ export class NotificationsService {
   }
 
   async counts(user: RequestUser) {
-    const restaurantId = this.restaurantId(user);
+    const restaurantId = await this.restaurantId(user);
     const [unread, pending] = await this.prisma.$transaction([
       this.prisma.notification.count({ where: { restaurantId, deletedAt: null, status: "pending", reads: { none: { userId: user.sub } } } }),
       this.prisma.notification.count({ where: { restaurantId, deletedAt: null, status: "pending" } })
@@ -79,7 +82,7 @@ export class NotificationsService {
   }
 
   private async find(user: RequestUser, id: string) {
-    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId: this.restaurantId(user), deletedAt: null } });
+    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId: await this.restaurantId(user), deletedAt: null } });
     if (!notification) throw new NotFoundException("Notificación no encontrada");
     return notification;
   }
@@ -105,7 +108,7 @@ export class NotificationsService {
   }
 
   async remove(user: RequestUser, id: string) {
-    const restaurantId = this.restaurantId(user);
+    const restaurantId = await this.restaurantId(user);
     const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId } });
     if (!notification) throw new NotFoundException("Notificación no encontrada");
     if (notification.status !== "attended") throw new ConflictException("Primero marcá la notificación como atendida para eliminarla");

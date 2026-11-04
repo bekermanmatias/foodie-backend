@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
+    "test:restaurant-features": "npm run build && node --test test/restaurant-features.test.js",
     "test:floor-plans": "npm run build && node --test test/floor-plans-layout.test.js",
     "test:multi-gift-cards": "npm run build && node --test test/multi-gift-cards.test.js",
     "start": "node dist/main.js",

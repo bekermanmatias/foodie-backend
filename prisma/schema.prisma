@@ -160,6 +160,8 @@ model Restaurant {
   slug              String              @unique
   profileImageUrl   String?
   isActive          Boolean             @default(true)
+  isDemo            Boolean             @default(false)
+  featureOverrides  Json                @default("{}")
   chatModuleEnabled Boolean             @default(false)
   chatClientId      String?
   chatWabaId        String?

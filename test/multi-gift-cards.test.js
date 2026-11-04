@@ -11,7 +11,7 @@ const audit = { log: async () => {} };
 const owner = { sub: 'owner-1', scope: 'restaurant', restaurantId: 'restaurant-1', role: 'restaurant_owner' };
 
 test('quantity defaults to one and three cards have one total', async () => {
-  const prisma = { giftCardProduct: { findFirst: async () => product() } };
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) }, giftCardProduct: { findFirst: async () => product() } };
   const service = new GiftCardsService(prisma, audit);
   const one = await service.resolveOrder('restaurant-1', buyer);
   const three = await service.resolveOrder('restaurant-1', { ...buyer, quantity: 3 });
@@ -26,7 +26,7 @@ test('quantity defaults to one and three cards have one total', async () => {
 test('confirmation creates one order and repeated confirmation returns it', async () => {
   const quote = { id: 'checkout-1', restaurantId: 'restaurant-1', productId: 'product-1', product: product(), status: 'PENDING', expiresAt: new Date(Date.now() + 60000), type: 'FIXED_MENU', quantity: 3, unitAmount: decimal(132000), totalAmount: decimal(396000), currency: 'ARS', purchaserName: buyer.purchaserName, purchaserPhone: buyer.purchaserPhone, partySize: 2, recipientName: null, message: null, order: null };
   const orders = [];
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     giftCardCheckout: { findFirst: async () => quote },
     $transaction: async (fn) => fn({
       giftCardCheckout: { updateMany: async () => { if (quote.status !== 'PENDING') return { count: 0 }; quote.status = 'CONFIRMED'; return { count: 1 }; } },
@@ -45,7 +45,7 @@ test('confirmation creates one order and repeated confirmation returns it', asyn
 
 test('price change produces a new proposal and requires another confirmation', async () => {
   const quote = { id: 'checkout-1', restaurantId: 'restaurant-1', productId: 'product-1', product: { ...product(), price: decimal(140000) }, status: 'PENDING', expiresAt: new Date(Date.now() + 60000), type: 'FIXED_MENU', quantity: 3, unitAmount: decimal(132000), totalAmount: decimal(396000), currency: 'ARS', purchaserName: buyer.purchaserName, purchaserPhone: buyer.purchaserPhone, partySize: 2, recipientName: null, message: null, order: null };
-  const prisma = { giftCardCheckout: { findFirst: async () => quote } };
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) }, giftCardCheckout: { findFirst: async () => quote } };
   const service = new GiftCardsService(prisma, audit);
   service.externalRestaurant = async () => 'restaurant-1';
   service.prepareExternal = async (_key, input) => {
@@ -59,7 +59,7 @@ test('price change produces a new proposal and requires another confirmation', a
 
 test('a repeated WhatsApp confirmation key cannot confirm a newer quote', async () => {
   const firstResponse = { order: { id: 'order-1', quantity: 3, amount: 396000 } };
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     externalApiRequest: { findFirst: async () => ({ requestHash: createHash('sha256').update(buyer.purchaserPhone).digest('hex'), responseData: firstResponse }) },
   };
   const service = new GiftCardsService(prisma, audit);
@@ -71,7 +71,7 @@ test('a repeated WhatsApp confirmation key cannot confirm a newer quote', async 
 test('one payment issues three independent codes and cards', async () => {
   const order = { id: 'order-1', restaurantId: 'restaurant-1', productId: 'product-1', product: product(), type: 'FIXED_MENU', purchaserName: buyer.purchaserName, purchaserPhone: buyer.purchaserPhone, quantity: 3, unitAmount: decimal(132000), amount: decimal(396000), currency: 'ARS', paymentStatus: 'PENDING', giftCards: [] };
   const cards = [];
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     giftCardOrder: { findFirst: async () => order },
     $transaction: async (fn) => fn({
       giftCardOrder: { updateMany: async () => { order.paymentStatus = 'CONFIRMED'; return { count: 1 }; } },
@@ -89,7 +89,7 @@ test('one payment issues three independent codes and cards', async () => {
 
 test('one-card payment keeps the legacy giftCard response', async () => {
   const order = { id: 'order-one', restaurantId: 'restaurant-1', productId: 'product-1', product: product(), type: 'FIXED_MENU', purchaserName: buyer.purchaserName, purchaserPhone: buyer.purchaserPhone, quantity: 1, unitAmount: decimal(132000), amount: decimal(132000), currency: 'ARS', paymentStatus: 'PENDING', giftCards: [] };
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     giftCardOrder: { findFirst: async () => order },
     $transaction: async (fn) => fn({ giftCardOrder: { updateMany: async () => ({ count: 1 }) }, giftCard: { create: async ({ data }) => ({ id: 'card-one', status: 'ACTIVE', issuedAt: new Date(), sentAt: null, ...data }) } }),
   };
@@ -102,7 +102,7 @@ test('one-card payment keeps the legacy giftCard response', async () => {
 
 test('cancelling one card keeps the other cards active', async () => {
   const cards = [1, 2, 3].map((i) => ({ id: `card-${i}`, orderId: 'order-1', restaurantId: 'restaurant-1', status: 'ACTIVE', redemptions: [], order: { status: 'PAID' } }));
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     giftCard: { findFirst: async () => cards[0] },
     $transaction: async (fn) => fn({ giftCard: { updateMany: async ({ where }) => { cards.find((card) => card.id === where.id).status = 'CANCELLED'; return { count: 1 }; }, count: async () => cards.filter((card) => card.status !== 'CANCELLED').length }, giftCardOrder: { update: async () => { throw new Error('Order should stay paid'); } } }),
   };
@@ -115,7 +115,7 @@ test('cancelling one card keeps the other cards active', async () => {
 test('partial send records successes and retry sends only pending cards', async () => {
   const cards = [1, 2, 3].map((i) => ({ id: `card-${i}`, displayCode: `CODE000${i}`, status: 'ACTIVE', imageUrl: `/card-${i}.png`, sentAt: null }));
   const order = { id: 'order-1', restaurantId: 'restaurant-1', purchaserPhone: buyer.purchaserPhone, quantity: 3, giftCards: cards, restaurant: { chatPhoneNumberId: 'phone-id' }, sentAt: null };
-  const prisma = {
+  const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) },
     giftCardOrder: { findFirst: async () => order, update: async ({ data }) => { order.sentAt = data.sentAt; return order; } },
     giftCard: { update: async ({ where, data }) => { cards.find((card) => card.id === where.id).sentAt = data.sentAt; }, count: async () => cards.filter((card) => card.sentAt).length },
   };
