@@ -9,7 +9,8 @@ const optionalText = (max: number) => z.string().trim().max(max).nullable().opti
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const specialSchema = z.object({ id: z.string().cuid().optional(), title: z.string().trim().min(2).max(120), description: optionalText(1000), price: z.number().nonnegative().max(9_999_999).nullable().optional(), imageUrl: optionalUrl, externalUrl: optionalUrl, isActive: z.boolean(), startsAt: date, endsAt: date }).refine((value) => value.endsAt >= value.startsAt, "La vigencia final debe ser posterior al inicio");
-const faqSchema = z.object({ id: z.string().cuid().optional(), topic: z.string().trim().min(2).max(80), question: z.string().trim().min(4).max(300), answer: z.string().trim().min(2).max(2000), isActive: z.boolean() });
+// Existing FAQs may have imported IDs. Preserve them; the service checks restaurant ownership.
+const faqSchema = z.object({ id: z.string().refine((value) => value.trim().length > 0, "El ID de la FAQ no puede estar vacío").optional(), topic: z.string().trim().min(2).max(80), question: z.string().trim().min(4).max(300), answer: z.string().trim().min(2).max(2000), isActive: z.boolean() });
 const updateBase = { id: z.string().cuid().optional(), title: z.string().trim().min(2).max(120), category: z.enum(["menu", "hours", "event", "promotion", "general"]), content: z.string().trim().min(2).max(3000), isActive: z.boolean() };
 const assistantUpdateSchema = z.union([
   z.object({ ...updateBase, validityType: z.literal("indefinite"), startsAt: z.null().optional(), endsAt: z.null().optional() }),
