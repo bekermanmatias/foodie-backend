@@ -1,19 +1,23 @@
--- AlterTable
-ALTER TABLE "ReservationDeposit" ADD COLUMN     "confirmationAt" TIMESTAMP(3),
-ADD COLUMN     "dueAt" TIMESTAMP(3),
-ADD COLUMN     "ruleSnapshot" JSONB;
+-- Preserve legacy columns and columns left by a failed, non-transactional attempt.
+-- Keep the remaining statements atomic when the migration is retried.
+BEGIN;
 
 -- AlterTable
-ALTER TABLE "DepositEntry" ADD COLUMN     "idempotencyKey" TEXT;
+ALTER TABLE "ReservationDeposit" ADD COLUMN IF NOT EXISTS "confirmationAt" TIMESTAMP(3),
+ADD COLUMN IF NOT EXISTS "dueAt" TIMESTAMP(3),
+ADD COLUMN IF NOT EXISTS "ruleSnapshot" JSONB;
 
 -- AlterTable
-ALTER TABLE "DepositProof" ADD COLUMN     "driveError" TEXT,
-ADD COLUMN     "driveFileId" TEXT,
-ADD COLUMN     "driveFileUrl" TEXT,
-ADD COLUMN     "driveStatus" TEXT NOT NULL DEFAULT 'pending',
-ADD COLUMN     "ingestionKey" TEXT,
-ADD COLUMN     "rejectionReason" TEXT,
-ADD COLUMN     "reviewStatus" TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE "DepositEntry" ADD COLUMN IF NOT EXISTS "idempotencyKey" TEXT;
+
+-- AlterTable
+ALTER TABLE "DepositProof" ADD COLUMN IF NOT EXISTS "driveError" TEXT,
+ADD COLUMN IF NOT EXISTS "driveFileId" TEXT,
+ADD COLUMN IF NOT EXISTS "driveFileUrl" TEXT,
+ADD COLUMN IF NOT EXISTS "driveStatus" TEXT NOT NULL DEFAULT 'pending',
+ADD COLUMN IF NOT EXISTS "ingestionKey" TEXT,
+ADD COLUMN IF NOT EXISTS "rejectionReason" TEXT,
+ADD COLUMN IF NOT EXISTS "reviewStatus" TEXT NOT NULL DEFAULT 'pending';
 
 -- CreateTable
 CREATE TABLE "RestaurantDepositSettings" (
@@ -97,3 +101,5 @@ ALTER TABLE "DepositDelivery" ADD CONSTRAINT "DepositDelivery_restaurantId_fkey"
 
 
 UPDATE "DepositProof" SET "reviewStatus" = 'approved' WHERE "entryId" IS NOT NULL;
+
+COMMIT;
