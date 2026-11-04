@@ -19,7 +19,7 @@ async function main() {
   await prisma.$executeRawUnsafe('ALTER TABLE "Restaurant" DROP COLUMN "isDemo", DROP COLUMN "featureOverrides"');
   await prisma.$executeRawUnsafe(fs.readFileSync(path.join(__dirname, "../prisma/migrations/20261104_restaurant_features/migration.sql"), "utf8"));
   const controller = new RestaurantFeaturesController(prisma);
-  assert.deepEqual((await controller.get(existing.id)).enabled, { giftCards: true, notifications: true });
+  assert.deepEqual((await controller.get(existing.id)).enabled, { deposits: false, giftCards: true, notifications: true });
   assert.equal((await controller.get(existing.id)).isDemo, false);
   const demo = await prisma.restaurant.create({ data: { name: "Demo", slug: "demo" } });
   const admin = await prisma.platformUser.create({ data: { fullName: "Admin", email: "admin@features.test", passwordHash: "test-only", role: "platform_admin" } });
@@ -31,8 +31,8 @@ async function main() {
     controller.patch(demo.id, { overrides: { giftCards: false } }, actor),
     controller.patch(demo.id, { overrides: { notifications: false } }, actor)
   ]);
-  assert.deepEqual((await controller.get(demo.id)).enabled, { giftCards: false, notifications: false });
-  assert.deepEqual((await controller.get(existing.id)).enabled, { giftCards: true, notifications: true });
+  assert.deepEqual((await controller.get(demo.id)).enabled, { deposits: false, giftCards: false, notifications: false });
+  assert.deepEqual((await controller.get(existing.id)).enabled, { deposits: false, giftCards: true, notifications: true });
   const service = new GiftCardsService(prisma, {});
   const owner = { sub: "owner", restaurantId: demo.id, scope: "restaurant", role: "restaurant_owner" };
   await assert.rejects(service.listProducts(owner), (error) => error.getResponse().code === "MODULE_DISABLED");

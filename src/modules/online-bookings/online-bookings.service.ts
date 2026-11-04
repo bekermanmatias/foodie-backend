@@ -274,7 +274,7 @@ export class OnlineBookingsService {
     if (!available) throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
     try {
       const reservation = await this.reservations.createReservationForRestaurant(restaurant.id, { branchId: branch.id, roomId: available.roomId, fullName: input.fullName, phone: input.phone, partySize: input.partySize, serviceDate: input.date, serviceTime: input.time, preferredFeatures: input.preferredFeatures, notes: input.notes, durationMinutes: schedule.durationMinutes || branch.onlineBookingDurationMinutes, turnoverMinutes: schedule.turnoverMinutes || 0 }, { source: "public_web" });
-      return { code: reservation.code, date: input.date, time: reservation.serviceTime, partySize: reservation.partySize, branch: branch.name, restaurant: restaurant.name };
+      return { status: reservation.status, deposit: reservation.deposit ? { requiredAmount: reservation.deposit.requiredAmount, dueAt: reservation.deposit.dueAt, instructions: reservation.deposit.ruleSnapshot } : null, code: reservation.code, date: input.date, time: reservation.serviceTime, partySize: reservation.partySize, branch: branch.name, restaurant: restaurant.name };
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") throw new ConflictException({ code: "SLOT_UNAVAILABLE", message: "This time is no longer available" });
       throw error;

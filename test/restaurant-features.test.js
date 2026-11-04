@@ -15,6 +15,7 @@ function fixture() {
       findUnique: async ({ where }) => structuredClone(rows[where.id] || null),
       update: async ({ where, data }) => Object.assign(rows[where.id], structuredClone(data))
     },
+    restaurantCustomization: { upsert: async () => ({}) },
     auditLog: { create: async ({ data }) => audits.push(structuredClone(data)) },
     $queryRaw: async () => [],
     $transaction: async (fn) => fn(prisma)
@@ -25,7 +26,7 @@ const actor = { sub: "admin", scope: "platform", role: "platform_admin" };
 const owner = (restaurantId) => ({ sub: "owner", scope: "restaurant", role: "restaurant_owner", restaurantId });
 
 test("current modules remain on; future definitions default off and previews depend on modules", () => {
-  assert.deepEqual(resolveFeatures({}), { giftCards: true, notifications: true });
+  assert.deepEqual(resolveFeatures({}), { deposits: false, giftCards: true, notifications: true });
   const catalog = [{ key: "module", group: "module" }, { key: "preview", group: "preview", module: "module" }];
   assert.deepEqual(resolveFeatures({}, catalog), { module: false, preview: false });
   assert.equal(resolveFeatures({ preview: true }, catalog).preview, false);
@@ -37,8 +38,8 @@ test("PATCH merges only selected options, audits before/after, and isolates rest
   const f = fixture();
   await f.controller.patch("demo", { overrides: { giftCards: false } }, actor);
   await f.controller.patch("demo", { overrides: { notifications: false } }, actor);
-  assert.deepEqual((await f.controller.get("demo")).enabled, { giftCards: false, notifications: false });
-  assert.deepEqual((await f.controller.get("real")).enabled, { giftCards: true, notifications: true });
+  assert.deepEqual((await f.controller.get("demo")).enabled, { deposits: false, giftCards: false, notifications: false });
+  assert.deepEqual((await f.controller.get("real")).enabled, { deposits: false, giftCards: true, notifications: true });
   assert.equal(f.audits[0].platformUserId, "admin");
   assert.deepEqual(f.audits[0].metadata.before.featureOverrides, {});
   assert.deepEqual(f.audits[0].metadata.after.featureOverrides, { giftCards: false });

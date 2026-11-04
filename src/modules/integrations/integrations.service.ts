@@ -1,4 +1,4 @@
-import { requireExternalAccess } from "../../common/restaurant-features";
+import { resolveFeatures, requireExternalAccess } from "../../common/restaurant-features";
 import { NotificationsService, type ChatOrderInput } from "../notifications/notifications.service";
 import { Injectable } from "@nestjs/common";
 import { BadRequestException, ConflictException, ForbiddenException, HttpException } from "@nestjs/common";
@@ -66,6 +66,7 @@ export class IntegrationsService {
     const restaurant = await this.prisma.restaurant.findUniqueOrThrow({
       where: { id: token.restaurantId },
       include: {
+        depositSettings: true,
         customization: true,
         onlineBooking: true,
         specials: { where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } }, orderBy: [{ startsAt: "asc" }, { title: "asc" }] },
@@ -81,6 +82,8 @@ export class IntegrationsService {
     await this.prisma.integrationToken.update({ where: { id: token.id }, data: { lastUsedAt: now } });
     const booking = restaurant.onlineBooking;
     return {
+      features: resolveFeatures(restaurant.featureOverrides),
+      depositPolicy: resolveFeatures(restaurant.featureOverrides).deposits ? restaurant.depositSettings?.config ?? null : null,
       restaurant: { name: restaurant.name, slug: restaurant.slug, description: restaurant.customization?.description || null, address: restaurant.customization?.address || null, mapsUrl: restaurant.customization?.mapsUrl || null, menuUrl: restaurant.customization?.menuUrl || null, whatsappPhone: booking?.whatsappPhone || null },
       specials: restaurant.specials.map((special) => ({ title: special.title, description: special.description, price: special.price ? Number(special.price) : null, imageUrl: special.imageUrl, externalUrl: special.externalUrl, startsAt: special.startsAt.toISOString().slice(0, 10), endsAt: special.endsAt.toISOString().slice(0, 10) })),
       reservationPolicy: { isEnabled: booking?.isEnabled || false, minAdvanceMinutes: booking?.minAdvanceMinutes || 60, maxAdvanceDays: booking?.maxAdvanceDays || 60, minPartySize: booking?.minPartySize || 1, maxPartySize: booking?.maxPartySize || 15 },
@@ -96,7 +99,7 @@ export class IntegrationsService {
     const restaurant = await this.prisma.restaurant.findUniqueOrThrow({
       where: { id: token.restaurantId },
       include: {
-        customization: true, onlineBooking: true,
+        depositSettings: true, customization: true, onlineBooking: true,
         specials: { where: { isActive: true, startsAt: { lte: now }, endsAt: { gte: now } }, orderBy: { title: "asc" } },
         giftCardProducts: { where: { isActive: true }, orderBy: { createdAt: "asc" } },
         faqs: { where: { isActive: true }, orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
@@ -117,6 +120,8 @@ export class IntegrationsService {
     }).sort();
     const nextContextChangeAt = nextChangeDates[0] ? new Date(`${nextChangeDates[0]}T00:00:00.000Z`).toISOString() : null;
     const context = {
+      features: resolveFeatures(restaurant.featureOverrides),
+      depositPolicy: resolveFeatures(restaurant.featureOverrides).deposits ? restaurant.depositSettings?.config ?? null : null,
       restaurant: { name: restaurant.name, slug: restaurant.slug, description: c?.description || null, cuisineType: c?.cuisineType || null, address: c?.address || null, city: c?.city || null, province: c?.province || null, country: c?.country || null, phone: c?.phone || null, whatsapp: c?.humanSupportWhatsapp || b?.whatsappPhone || null, email: c?.email || null, websiteUrl: c?.websiteUrl || null, instagramUrl: c?.instagramUrl || null, googleMapsUrl: c?.mapsUrl || null, menuUrl: c?.menuUrl || null },
       assistant: { enabled: c?.assistantEnabled ?? true, name: c?.assistantName || null, role: c?.assistantRole || "asistente virtual", locale: c?.assistantLocale || "es-AR", tone: c?.assistantTone || "calido_breve_profesional", firstGreeting: c?.assistantFirstGreeting || null, disclosure: c?.assistantDisclosure ?? true, humanSupport: { phone: c?.humanSupportPhone || c?.phone || null, whatsapp: c?.humanSupportWhatsapp || b?.whatsappPhone || null, email: c?.humanSupportEmail || c?.email || null } },
       reservationPolicy: { publicBookingEnabled: b?.isEnabled || false, minimumAdvanceMinutes: b?.minAdvanceMinutes || 60, maximumAdvance: { value: b?.maximumAdvanceValue || b?.maxAdvanceDays || 60, unit: b?.maximumAdvanceUnit || "days" }, onlinePartySize: { min: b?.minPartySize || 1, max: b?.maxPartySize || 15 }, largeParty: { partySizeFrom: b?.largePartyThreshold || null, action: b?.largePartyThreshold ? "whatsapp" : null }, agency: { partySizeFrom: b?.agencyPartyThreshold || null, action: b?.agencyPartyThreshold ? "ask_if_agency" : null }, reminder: { enabled: b?.remindersEnabled ?? false, partySizeFrom: b?.reminderPartySizeFrom || null, hoursBefore: b?.reminderHoursBefore || null, channel: "whatsapp" }, cutoffRules: restaurant.bookingCutoffs.map((rule) => ({ service: rule.service, weekdays: rule.weekdays, minimumAdvanceMinutes: rule.minimumAdvanceMinutes, sameDayOnly: rule.sameDayOnly, fallbackAction: rule.fallbackAction })) },

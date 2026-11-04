@@ -1,3 +1,4 @@
+import { initialReservationDeposit } from "../deposits/deposit-rules";
 import { Injectable } from "@nestjs/common";
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
@@ -388,6 +389,7 @@ export class ReservationsService {
       });
       if (eventConflict) throw new ConflictException("Uno de los salones ya esta asignado a otro evento para este servicio.");
 
+      const initialDeposit = await initialReservationDeposit(tx, restaurantId, input.partySize, specialService?.id);
       const reservationCode = await this.createAvailableReservationCode(tx);
       const customer = await this.upsertCustomer(tx, restaurantId, { ...input, email: this.normalizeOptionalEmail(input.email) }, { incrementReservationCount: true });
       return tx.reservation.create({
@@ -402,7 +404,8 @@ export class ReservationsService {
           phone: input.phone,
           email: this.normalizeOptionalEmail(input.email) ?? null,
           partySize: input.partySize,
-          status: "confirmed",
+          status: initialDeposit ? "pending" : "confirmed",
+          ...(initialDeposit ? { deposit: { create: { restaurantId, branchId: input.branchId, ...initialDeposit } } } : {}),
           turn,
           specialServiceId: specialService?.id || null,
           serviceDate,
@@ -777,6 +780,7 @@ export class ReservationsService {
         ...input,
         email: this.normalizeOptionalEmail(input.email)
       };
+      const initialDeposit = await initialReservationDeposit(tx, restaurantId, input.partySize, specialService?.id);
       const reservationCode = await this.createAvailableReservationCode(tx);
       const customer = await this.upsertCustomer(tx, restaurantId, normalizedInput, {
         incrementReservationCount: true
@@ -793,7 +797,8 @@ export class ReservationsService {
           phone: input.phone,
           email: normalizedInput.email ?? null,
           partySize: input.partySize,
-          status: "confirmed",
+          status: initialDeposit ? "pending" : "confirmed",
+          ...(initialDeposit ? { deposit: { create: { restaurantId, branchId: input.branchId, ...initialDeposit } } } : {}),
           turn,
           specialServiceId: specialService?.id || null,
           serviceDate,
@@ -820,6 +825,7 @@ export class ReservationsService {
           }
         },
         include: {
+          deposit: true,
           room: true,
           customer: { include: { tags: true } },
           tables: { include: { table: true } }
@@ -1050,6 +1056,33 @@ export class ReservationsService {
       if (assignment) return { roomId: room.id, serviceTime, turn };
     }
     return null;
+  }
+
+  async confirmDepositReservation(tx: Prisma.TransactionClient, restaurantId: string, reservationId: string) {
+    const reservation = await tx.reservation.findFirst({ where: { id: reservationId, restaurantId }, include: { tables: true, eventRoomAssignments: true, branch: true } });
+    if (!reservation || reservation.status !== "pending") throw new ConflictException("La reserva debe estar pendiente para confirmarla");
+    if (!reservation.branch.isEnabled) throw new ConflictException("La sucursal ya no está habilitada");
+    const roomIds = [...new Set([reservation.roomId, ...reservation.eventRoomAssignments.map((room) => room.roomId)])].sort();
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Room" WHERE id IN (${Prisma.join(roomIds)}) ORDER BY id FOR UPDATE`);
+    for (const roomId of roomIds) {
+      const room = await tx.room.findFirst({ where: { id: roomId, restaurantId, isActive: true }, include: { tables: { where: { isActive: true, isReservable: true } } } });
+      if (!room || await this.isRoomBlocked(restaurantId, roomId, reservation.serviceDate, reservation.turn)) throw new ConflictException("El salón ya no está disponible; revisá la asignación");
+      if (!reservation.eventRoomAssignments.length) {
+        const available = await this.listAvailableTables(tx, { ...reservation, preferredZone: reservation.preferredZone ?? undefined, roomId, excludeReservationId: reservation.id });
+        const ids = new Set(available.map((table) => table.id));
+        if (!reservation.tables.length || reservation.tables.some((table) => !ids.has(table.tableId))) throw new ConflictException("Las mesas asignadas ya no están disponibles; revisá la reserva");
+        const assigned = new Set(reservation.tables.map((item) => item.tableId));
+        if (available.filter((table) => assigned.has(table.id)).reduce((sum, table) => sum + this.tableCapacity(table), 0) < reservation.partySize) throw new ConflictException("Las mesas asignadas ya no tienen capacidad suficiente");
+      } else {
+        const others = await tx.reservation.findMany({ where: { restaurantId, id: { not: reservationId }, serviceDate: reservation.serviceDate, status: { in: ["pending", "confirmed", "seated"] }, OR: [{ roomId }, { eventRoomAssignments: { some: { roomId } } }] }, include: { eventRoomAssignments: true } });
+        const start = this.timeToMinutes(reservation.serviceTime); const end = start + reservation.durationMinutes + reservation.turnoverMinutes;
+        const overlapping = others.filter((other) => { const time = this.timeToMinutes(other.serviceTime); return time < end && start < time + other.durationMinutes + other.turnoverMinutes; });
+        const assignment = reservation.eventRoomAssignments.find((item) => item.roomId === roomId)!;
+        const covers = overlapping.reduce((sum, other) => sum + (other.eventRoomAssignments.find((item) => item.roomId === roomId)?.allocatedCovers ?? other.partySize), 0);
+        if ((assignment.usage === "full" && overlapping.length) || overlapping.some((other) => other.eventRoomAssignments.some((item) => item.roomId === roomId && item.usage === "full")) || covers + assignment.allocatedCovers > room.tables.reduce((sum, table) => sum + this.tableCapacity(table), 0)) throw new ConflictException("El salón no tiene cupo disponible para confirmar el evento");
+      }
+    }
+    return tx.reservation.update({ where: { id: reservationId }, data: { status: "confirmed" } });
   }
 
   async moveToState(user: RequestUser, reservationId: string, next: "seated" | "completed") {
@@ -1338,6 +1371,10 @@ export class ReservationsService {
     const tableStatus = next === "seated" ? "occupied" : "free";
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id=${reservation.id} FOR UPDATE`;
+      const current = await tx.reservation.findUniqueOrThrow({ where: { id: reservation.id }, include: { deposit: true } });
+      if (current.status === "pending" && current.deposit) throw new ConflictException("Primero completá la seña y confirmá la reserva desde Señas y pagos");
+
       const changed = await tx.reservation.update({
         where: { id: reservation.id },
         data: { status: nextStatus },

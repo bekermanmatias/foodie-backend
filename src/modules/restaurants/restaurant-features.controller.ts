@@ -45,6 +45,7 @@ export class RestaurantFeaturesController {
       const overrides = { ...(before.featureOverrides as Record<string, boolean>), ...input.overrides };
       const after = { isDemo: input.isDemo ?? before.isDemo, featureOverrides: overrides };
       await tx.restaurant.update({ where: { id: restaurantId }, data: after });
+      await tx.restaurantCustomization.upsert({ where: { restaurantId }, create: { restaurantId, configVersion: 2 }, update: { configVersion: { increment: 1 } } });
       await tx.auditLog.create({ data: { action: "restaurant.features.updated", targetType: "restaurant", targetId: restaurantId,
         restaurantId, platformUserId: actor.sub, metadata: { before, after } } });
       return { isDemo: after.isDemo, overrides, enabled: resolveFeatures(overrides), catalog: FEATURE_CATALOG };

@@ -183,6 +183,9 @@ model Restaurant {
   customerTags      CustomerTag[]
   chatTagStyles     ChatTagStyle[]
   reservations      Reservation[]
+  depositSettings   RestaurantDepositSettings?
+  driveConnection   RestaurantDriveConnection?
+  depositDeliveries DepositDelivery[]
   deposits          ReservationDeposit[]
   depositProofs     DepositProof[]
   serviceStates     ServiceState[]
@@ -692,6 +695,9 @@ model ReservationDeposit {
   restaurantId   String
   branchId       String
   reservationId  String        @unique
+  dueAt          DateTime?
+  ruleSnapshot   Json?
+  confirmationAt DateTime?
   requiredAmount Decimal       @db.Decimal(12, 2)
   paidAmount     Decimal       @default(0) @db.Decimal(12, 2)
   currency       String        @default("ARS")
@@ -717,11 +723,13 @@ model DepositEntry {
   paymentMethod  String
   reference      String?
   notes          String?
+  idempotencyKey String?
   createdByUserId String?
   createdAt      DateTime         @default(now())
   deposit        ReservationDeposit @relation(fields: [depositId], references: [id], onDelete: Cascade)
   proofs         DepositProof[]
 
+  @@unique([depositId, idempotencyKey])
   @@index([depositId, paidAt])
 }
 
@@ -753,9 +761,16 @@ model DepositProof {
   originalName   String
   mimeType       String
   size           Int
+  ingestionKey   String? @unique
   messageId      String?
   caption        String?
   receivedAt     DateTime @default(now())
+  reviewStatus   String   @default("pending")
+  rejectionReason String?
+  driveFileId    String?
+  driveFileUrl   String?
+  driveStatus    String   @default("pending")
+  driveError     String?
   reviewedAt     DateTime?
   reviewedByUserId String?
   restaurant     Restaurant          @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1127,4 +1142,50 @@ model NotificationRead {
   user RestaurantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
   @@id([notificationId, userId])
   @@index([userId])
+}
+
+model RestaurantDepositSettings {
+  restaurantId String @id
+  config Json
+  updatedAt DateTime @updatedAt
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+}
+model RestaurantDriveConnection {
+  restaurantId String @id
+  encryptedRefreshToken String?
+  stateHash String? @unique
+  stateExpiresAt DateTime?
+  stateUserId String?
+  rootFolderId String?
+  proofsFolderId String?
+  generalFolderId String?
+  status String @default("disconnected")
+  error String?
+  updatedAt DateTime @updatedAt
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+}
+model DepositDelivery {
+  id String @id @default(cuid())
+  restaurantId String
+  reservationId String
+  kind String
+  status String @default("pending")
+  attempts Int @default(0)
+  error String?
+  sentAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  @@unique([reservationId, kind])
+  @@index([restaurantId, status])
+}
+model DepositUpload {
+  objectKey String @id
+  restaurantId String
+  requestId String?
+  fileName String
+  mimeType String
+  size Int
+  expiresAt DateTime
+  confirmedAt DateTime?
 }

@@ -4,6 +4,7 @@ import { PrismaService } from "../modules/prisma/prisma.service";
 export type FeatureDefinition = { key: string; label: string; description: string; group: "module" | "preview"; defaultEnabled?: boolean; module?: string };
 // New definitions default to OFF. Preview implementations must branch using requireFeature/isFeatureEnabled.
 export const FEATURE_CATALOG: FeatureDefinition[] = [
+  { key: "deposits", label: "Señas y pagos", description: "Comprobantes, revisión de pagos, reservas y Google Drive.", group: "module" },
   { key: "giftCards", label: "Gift Cards", description: "Productos, emisión y gestión de Gift Cards.", group: "module", defaultEnabled: true },
   { key: "notifications", label: "Notificaciones", description: "Alertas y seguimiento de pedidos por chat.", group: "module", defaultEnabled: true }
 ];

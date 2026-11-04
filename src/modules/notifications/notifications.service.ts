@@ -1,4 +1,4 @@
-import { requireFeature } from "../../common/restaurant-features";
+import { requireFeature, restaurantFeatures } from "../../common/restaurant-features";
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { RequestUser } from "../../common/auth/request-user";
 import { PrismaService } from "../prisma/prisma.service";
@@ -20,13 +20,19 @@ export class NotificationsService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   private async restaurantId(user: RequestUser) {
-    if (user.scope !== "restaurant" || !user.restaurantId || !["restaurant_owner", "restaurant_manager", "host"].includes(user.role)) {
+    if (user.scope !== "restaurant" || !user.restaurantId || !["restaurant_owner", "restaurant_manager", "host", "cashier"].includes(user.role)) {
       throw new ForbiddenException("No tenés permiso para acceder a las notificaciones");
     }
     await requireFeature(this.prisma, user.restaurantId, "notifications");
     return user.restaurantId;
   }
 
+  private async visibleTypes(user: RequestUser) {
+    const enabled = (await restaurantFeatures(this.prisma, user.restaurantId!)).enabled.deposits;
+    if (user.role === "cashier") return { type: enabled ? "deposit_proof" : "__disabled__" };
+    if (!enabled || user.role === "host") return { type: { not: "deposit_proof" } };
+    return {};
+  }
   async receiveOrder(restaurantId: string, input: ChatOrderInput) {
     await requireFeature(this.prisma, restaurantId, "notifications");
     const eventKey = JSON.stringify([input.channelId, input.chatId, input.sourceMessageId]);
@@ -59,6 +65,7 @@ export class NotificationsService {
     const restaurantId = await this.restaurantId(user);
     const where = {
       restaurantId,
+      ...(await this.visibleTypes(user)),
       deletedAt: null,
       ...(input.status ? { status: input.status } : {}),
       ...(input.unread ? { reads: { none: { userId: user.sub } } } : {})
@@ -75,14 +82,14 @@ export class NotificationsService {
   async counts(user: RequestUser) {
     const restaurantId = await this.restaurantId(user);
     const [unread, pending] = await this.prisma.$transaction([
-      this.prisma.notification.count({ where: { restaurantId, deletedAt: null, status: "pending", reads: { none: { userId: user.sub } } } }),
-      this.prisma.notification.count({ where: { restaurantId, deletedAt: null, status: "pending" } })
+      this.prisma.notification.count({ where: { restaurantId, ...(await this.visibleTypes(user)), deletedAt: null, status: "pending", reads: { none: { userId: user.sub } } } }),
+      this.prisma.notification.count({ where: { restaurantId, ...(await this.visibleTypes(user)), deletedAt: null, status: "pending" } })
     ]);
     return { unread, pending };
   }
 
   private async find(user: RequestUser, id: string) {
-    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId: await this.restaurantId(user), deletedAt: null } });
+    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId: await this.restaurantId(user), ...(await this.visibleTypes(user)), deletedAt: null } });
     if (!notification) throw new NotFoundException("Notificación no encontrada");
     return notification;
   }
@@ -109,7 +116,7 @@ export class NotificationsService {
 
   async remove(user: RequestUser, id: string) {
     const restaurantId = await this.restaurantId(user);
-    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId } });
+    const notification = await this.prisma.notification.findFirst({ where: { id, restaurantId, ...(await this.visibleTypes(user)) } });
     if (!notification) throw new NotFoundException("Notificación no encontrada");
     if (notification.status !== "attended") throw new ConflictException("Primero marcá la notificación como atendida para eliminarla");
     // Keep source events so late retries cannot recreate an alert that was deleted.
