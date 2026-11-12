@@ -57,7 +57,7 @@ export class DepositDriveService {
     const data = await response.json() as { refresh_token?: string };
     if (!response.ok || !data.refresh_token) throw new BadRequestException("Google no entregó autorización para acceso sin conexión; intentá reconectar");
     await this.prisma.restaurantDriveConnection.update({ where: { restaurantId: connection.restaurantId }, data: { encryptedRefreshToken: this.encryptRefreshToken(data.refresh_token), status: "connected", error: null } });
-    return { connected: true, message: "Google Drive conectado. Podés cerrar esta ventana y volver a Foodie." };
+    return { connected: true };
   }
   private async api(restaurantId: string, suffix: string, init: RequestInit = {}, allowMissing = false) {
     await requireExternalAccess(this.prisma, restaurantId);

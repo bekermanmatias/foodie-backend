@@ -45,7 +45,24 @@ export class DepositsController {
   @Post("restaurant/deposits/drive/folders") setupFolders(@CurrentUser() user: RequestUser, @Body() body: unknown) { return this.drive.setup(user, z.object({ rootFolderId: z.string().min(1).max(200).optional() }).parse(body).rootFolderId); }
   @Get("restaurant/deposits/drive/files") files(@CurrentUser() user: RequestUser, @Query("category") category?: string, @Query("pageToken") pageToken?: string) { return this.drive.files(user, category, pageToken); }
   @Post("restaurant/deposits/proofs/:proofId/sync-drive") sync(@CurrentUser() user: RequestUser, @Param("proofId") id: string) { return this.drive.sync(user, id); }
-  @Public() @Get("external/deposits/drive/callback") callback(@Query("state") state: string, @Query("code") code?: string) { return this.drive.callback(state, code); }
+  @Public()
+  @Get("external/deposits/drive/callback")
+  async callback(
+    @Query("state") state: string,
+    @Query("code") code: string | undefined,
+    @Query("error") oauthError: string | undefined,
+    @Res() response: Response
+  ) {
+    const query = new URLSearchParams({ tab: "drive" });
+    try {
+      await this.drive.callback(state, oauthError ? undefined : code);
+    } catch {
+      query.set("connection", oauthError === "access_denied" ? "cancelled" : "failed");
+    }
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.redirect(303, `/senas?${query}`);
+  }
   @Get("restaurant/deposits/proofs/pending") pending(@CurrentUser() user: RequestUser) { return this.service.pendingProofs(user); }
   @Put("restaurant/reservations/:reservationId/deposit") upsert(@CurrentUser() user: RequestUser, @Param("reservationId") reservationId: string, @Body() body: unknown) { return this.service.upsert(user, reservationId, depositSchema.parse(body)); }
   @Post("restaurant/deposits/:depositId/entries") entry(@CurrentUser() user: RequestUser, @Param("depositId") depositId: string, @Body() body: unknown) { return this.service.addEntry(user, depositId, entrySchema.parse(body)); }
