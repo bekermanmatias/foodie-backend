@@ -386,11 +386,13 @@ export class GiftCardsService {
     if (order.giftCards.length !== order.quantity) throw new ConflictException("La compra todavía no tiene todas las Gift Cards emitidas");
     const activeCards = order.giftCards.filter((card) => card.status === GiftCardStatus.ACTIVE);
     if (!activeCards.length || activeCards.some((card) => !card.imageUrl)) throw new ConflictException("No hay Gift Cards activas con imagen para enviar");
-    const clientId = order.restaurant?.chatPhoneNumberId?.trim() || null;
-    const webhookUrl = restaurantWebhook("giftCard", clientId)!;
-    const webhookToken = n8nWebhookToken();
     const pending = resend ? activeCards : activeCards.filter((card) => !card.sentAt);
     if (!pending.length) return { sent: true, sentCount: activeCards.length, totalCount: activeCards.length, reason: null };
+    const clientId = order.restaurant?.chatPhoneNumberId?.trim();
+    if (!clientId) throw new ConflictException("Configurá el canal de WhatsApp de este restaurante antes de enviar Gift Cards");
+    const webhookUrl = restaurantWebhook("giftCard", restaurantId, clientId);
+    if (!webhookUrl) throw new ConflictException("Falta configurar el envío de Gift Cards para el canal de este restaurante");
+    const webhookToken = n8nWebhookToken();
     for (const card of pending) {
       let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
       try {

@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { createHash, randomBytes } from "node:crypto";
 import type { RequestUser } from "../../common/auth/request-user";
 import type { Prisma } from "@prisma/client";
+import { restaurantWebhook } from "../../common/restaurant-webhooks";
 import { encryptSecret, decryptSecret } from "../../common/security/encrypted-secret";
 import { restaurantFeatures, requireExternalAccess, requireFeature } from "../../common/restaurant-features";
 import { PrismaService } from "../prisma/prisma.service";
@@ -11,7 +12,7 @@ import { MAX_PROOF_BYTES, ProofStorageService, verifyProofContent } from "./proo
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
 const giftOrderSelect = {
-  id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, quantity: true,
+  id: true, restaurantId: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, quantity: true,
   product: { select: { name: true } },
   giftCards: { select: { status: true, sentAt: true, imageUrl: true } },
   restaurant: { select: { chatPhoneNumberId: true } }
@@ -23,13 +24,14 @@ function driveProperty(key: string, value: string) {
   return `appProperties has { key=${quote(key)} and value=${quote(value)} }`;
 }
 
-function giftProofOrder({ giftCards, quantity, restaurant, ...order }: Prisma.GiftCardOrderGetPayload<{ select: typeof giftOrderSelect }>) {
+function giftProofOrder({ giftCards, quantity, restaurant, restaurantId, ...order }: Prisma.GiftCardOrderGetPayload<{ select: typeof giftOrderSelect }>) {
   const active = giftCards.filter(card => card.status === "ACTIVE");
   return {
     ...order,
     delivery: {
       ready: giftCards.length === quantity && active.length > 0 && active.every(card => Boolean(card.imageUrl)),
       channelConfigured: Boolean(restaurant.chatPhoneNumberId?.trim()),
+      routeConfigured: Boolean(restaurantWebhook("giftCard", restaurantId, restaurant.chatPhoneNumberId)),
       sent: active.filter(card => Boolean(card.sentAt)).length,
       total: active.length
     }

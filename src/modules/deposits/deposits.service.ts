@@ -174,9 +174,10 @@ export class DepositsService {
     if ((await restaurantFeatures(this.prisma, restaurantId)).isDemo) return this.prisma.depositDelivery.update({ where: { id: delivery.id }, data: { status: "simulated", sentAt: new Date(), error: null } });
     await requireExternalAccess(this.prisma, restaurantId);
     const restaurant = await this.prisma.restaurant.findUniqueOrThrow({ where: { id: restaurantId }, select: { chatPhoneNumberId: true } });
-    const url = restaurantWebhook("depositConfirmation", restaurant.chatPhoneNumberId);
+    if (!restaurant.chatPhoneNumberId?.trim()) throw new ConflictException("Configurá el canal de WhatsApp de este restaurante antes de enviar confirmaciones");
+    const url = restaurantWebhook("depositConfirmation", restaurantId, restaurant.chatPhoneNumberId);
     const token = n8nWebhookToken();
-    if (!url || !token) throw new ConflictException("Falta configurar el envío de confirmaciones de señas");
+    if (!url || !token) throw new ConflictException("Falta configurar el envío de confirmaciones para el canal de este restaurante");
     const claimed = await this.prisma.depositDelivery.updateMany({ where: { id: delivery.id, status: { in: ["pending", "failed"] } }, data: { status: "sending", attempts: { increment: 1 }, error: null } });
     if (!claimed.count) throw new ConflictException("El envío está en proceso o requiere verificar el resultado anterior");
     try {

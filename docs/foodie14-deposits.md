@@ -90,8 +90,9 @@ Variables del backend:
 - `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`.
 - `GOOGLE_DRIVE_REDIRECT_URI`: URL registrada en Google, con la ruta
   `/v1/external/deposits/drive/callback` del backend público.
-- `N8N_DEPOSIT_CONFIRMATION_WEBHOOK_URL`: webhook
-  `/webhook/foodie-deposit-confirmation-v1` del workflow Realtime, una vez publicado.
+- `N8N_RESTAURANT_WEBHOOKS`: JSON por ID de restaurante con `channelId` y las URLs HTTPS de `giftCard` y/o `depositConfirmation`. El canal debe coincidir con `chatPhoneNumberId` del restaurante en Foodie y pertenecer a ese restaurante.
+  Ejemplo: `{"restaurante-id":{"channelId":"123456789","giftCard":"https://n8n.example.com/webhook/gift-cards-local","depositConfirmation":"https://n8n.example.com/webhook/confirmacion-local"}}`.
+- `N8N_GIFT_CARD_SEND_WEBHOOK_URL` y `N8N_DEPOSIT_CONFIRMATION_WEBHOOK_URL` se conservan como configuración de Estilo Campo para su canal registrado. DEMO FOODIE tiene rutas propias para el canal de Matías. Las cuentas nuevas requieren una entrada propia.
 - `N8N_WEBHOOK_TOKEN`: secreto compartido con n8n. El workflow debe permitir su
   lectura por expresiones `$env`; si la política del servidor lo bloquea,
   configurar autenticación equivalente mediante una credencial Header Auth antes

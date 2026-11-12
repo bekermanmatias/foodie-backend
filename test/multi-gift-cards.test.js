@@ -121,6 +121,8 @@ test('partial send records successes and retry sends only pending cards', async 
   };
   const service = new GiftCardsService(prisma, audit);
   const originalFetch = global.fetch;
+  const originalRoutes = process.env.N8N_RESTAURANT_WEBHOOKS;
+  process.env.N8N_RESTAURANT_WEBHOOKS = JSON.stringify({ 'restaurant-1': { channelId: 'phone-id', giftCard: 'https://example.test/gift' } });
   const sentCodes = [];
   let failSecond = true;
   global.fetch = async (_url, options) => {
@@ -130,6 +132,12 @@ test('partial send records successes and retry sends only pending cards', async 
     return { ok: true, json: async () => ({ sent: true }) };
   };
   try {
+    order.restaurant.chatPhoneNumberId = null;
+    await assert.rejects(service.sendGiftCard(owner, order.id), /Configurá el canal/);
+    order.restaurant.chatPhoneNumberId = 'different-channel';
+    await assert.rejects(service.sendGiftCard(owner, order.id), /Falta configurar el envío/);
+    assert.deepEqual(sentCodes, []);
+    order.restaurant.chatPhoneNumberId = 'phone-id';
     const partial = await service.sendGiftCard(owner, order.id);
     assert.equal(partial.sent, false);
     assert.equal(partial.sentCount, 1);
@@ -140,5 +148,9 @@ test('partial send records successes and retry sends only pending cards', async 
     assert.deepEqual(sentCodes, ['CODE0001', 'CODE0002', 'CODE0002', 'CODE0003']);
     assert.ok(cards.every((card) => card.sentAt));
     assert.ok(order.sentAt);
-  } finally { global.fetch = originalFetch; }
+  } finally {
+    global.fetch = originalFetch;
+    if (originalRoutes === undefined) delete process.env.N8N_RESTAURANT_WEBHOOKS;
+    else process.env.N8N_RESTAURANT_WEBHOOKS = originalRoutes;
+  }
 });
