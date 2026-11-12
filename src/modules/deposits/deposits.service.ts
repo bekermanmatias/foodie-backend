@@ -46,7 +46,7 @@ export class DepositsService {
       return config;
     });
   }
-  async list(user: RequestUser, input: { branchId?: string; status?: string; phone?: string; reservationId?: string; from?: string; to?: string; review?: string; expired?: boolean } = {}) {
+  async list(user: RequestUser, input: { branchId?: string; status?: string; phone?: string; reservationId?: string; from?: string; to?: string; review?: string; expired?: boolean; search?: string } = {}) {
     const restaurantId = await depositActor(this.prisma, user);
     const phone = input.phone ? normalizeDepositPhone(input.phone) : null;
     if (phone !== null && phone.length < 7) throw new BadRequestException("Teléfono incompleto");
@@ -54,10 +54,15 @@ export class DepositsService {
     const contactIds = phone ? await this.prisma.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Reservation" WHERE "restaurantId"=${restaurantId} AND regexp_replace(phone, '[^0-9]', '', 'g')=${phone}` : null;
     return this.prisma.reservationDeposit.findMany({ where: { restaurantId,
       ...(input.branchId ? { branchId: input.branchId } : {}), ...(input.reservationId ? { reservationId: input.reservationId } : {}),
-      ...(input.status ? { status: input.status as "pending" | "partial" | "complete" } : {}),
-      ...(input.expired ? { dueAt: { lt: new Date() }, status: { not: "complete" } } : {}),
+      status: { equals: input.status as "pending" | "partial" | "complete" | undefined, not: input.expired ? "complete" : undefined },
+      ...(input.expired ? { dueAt: { lt: new Date() } } : {}),
       ...(input.review ? { proofRequests: { some: { proofs: { some: { reviewStatus: input.review } } } } } : {}),
       reservation: { ...(contactIds ? { id: { in: contactIds.map((row) => row.id) } } : {}),
+        ...(input.search ? { OR: [
+          { fullName: { contains: input.search, mode: "insensitive" } },
+          { code: { contains: input.search, mode: "insensitive" } },
+          { phone: { contains: input.search } }
+        ] } : {}),
         ...((input.from || input.to) ? { serviceDate: { ...(input.from ? { gte: new Date(`${input.from}T00:00:00Z`) } : {}), ...(input.to ? { lte: new Date(`${input.to}T23:59:59Z`) } : {}) } } : {}) }
     }, include: detail, orderBy: { updatedAt: "desc" }, take: 200 });
   }

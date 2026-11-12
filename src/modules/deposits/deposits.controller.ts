@@ -16,12 +16,13 @@ const depositSchema = z.object({ requiredAmount: z.number().positive().multipleO
 const entrySchema = z.object({ type: z.enum(["payment", "refund", "adjustment"]), amount: z.number().positive().multipleOf(0.01).max(99999999), paidAt: z.string().min(10), paymentMethod: z.string().min(1).max(80), reference: z.string().max(160).optional(), notes: z.string().max(2000).optional(), proofIds: z.array(z.string()).max(20).optional(), idempotencyKey: z.string().min(8).max(120) });
 const uploadSchema = z.object({ fileName: z.string().min(1).max(255), mimeType: z.enum(["application/pdf", "image/jpeg", "image/png", "image/webp"]), size: z.number().int().positive().max(10 * 1024 * 1024) });
 const confirmSchema = uploadSchema.extend({ objectKey: z.string().min(1), messageId: z.string().max(255).optional(), caption: z.string().max(2000).optional() });
+const proofReview = z.enum(["pending", "approved", "rejected"]);
 
 @Controller()
 export class DepositsController {
   constructor(private readonly service: DepositsService, private readonly prisma: PrismaService, private readonly drive: DepositDriveService) {}
   @Get("restaurant/deposits") list(@CurrentUser() user: RequestUser, @Query() query: Record<string, string>) {
-    const parsed = z.object({ branchId: z.string().optional(), status: z.enum(["pending", "partial", "complete"]).optional(), phone: z.string().optional(), reservationId: z.string().optional(), from: z.string().date().optional(), to: z.string().date().optional(), review: z.enum(["pending", "approved", "rejected"]).optional(), expired: z.enum(["true", "false"]).optional().transform((value) => value === "true") }).parse(query);
+    const parsed = z.object({ branchId: z.string().optional(), status: z.enum(["pending", "partial", "complete"]).optional(), phone: z.string().optional(), reservationId: z.string().optional(), from: z.string().date().optional(), to: z.string().date().optional(), review: proofReview.optional(), search: z.string().trim().max(120).optional(), expired: z.enum(["true", "false"]).optional().transform((value) => value === "true") }).parse(query);
     return this.service.list(user, parsed);
   }
   @Get("restaurant/deposits/events") async events(@CurrentUser() user: RequestUser) { const restaurantId = await depositActor(this.prisma, user); return this.prisma.specialService.findMany({ where: { restaurantId }, select: { id: true, label: true, serviceDate: true }, orderBy: { serviceDate: "desc" }, take: 200 }); }
@@ -102,8 +103,16 @@ export class DepositsController {
     return this.drive.listGiftCardProofs(user, input.phone, input.orderIds);
   }
   @Get("restaurant/gift-cards/proofs/history")
-  giftCardProofHistory(@CurrentUser() user: RequestUser, @Query("pageToken") pageToken?: string) {
-    return this.drive.giftCardProofHistory(user, z.string().min(1).max(2048).optional().parse(pageToken));
+  giftCardProofHistory(@CurrentUser() user: RequestUser, @Query() query: Record<string, string>) {
+    const { pageToken, ...filters } = z.object({
+      pageToken: z.string().min(1).max(2048).optional(),
+      search: z.string().trim().max(120).optional(),
+      review: proofReview.optional(),
+      payment: z.enum(["PENDING", "CONFIRMED"]).optional(),
+      from: z.string().datetime().optional(),
+      before: z.string().datetime().optional()
+    }).parse(query);
+    return this.drive.giftCardProofHistory(user, pageToken, filters);
   }
   @Get("restaurant/gift-cards/orders/:orderId/proofs/:fileId")
   async giftCardProofFile(@CurrentUser() user: RequestUser, @Param("orderId") orderId: string, @Param("fileId") fileId: string, @Res() response: Response) {
