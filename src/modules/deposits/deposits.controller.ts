@@ -82,5 +82,28 @@ export class DepositsController {
   @Public() @Post("external/deposits/proof-requests/:requestId/upload-url") async upload(@Headers("x-api-key") apiKey: string, @Param("requestId") requestId: string, @Body() body: unknown) { return this.service.externalUploadUrl(await this.resolveRestaurant(apiKey), requestId, uploadSchema.parse(body)); }
   @Public() @Post("external/deposits/proof-requests/:requestId/confirm-upload") async confirm(@Headers("x-api-key") apiKey: string, @Param("requestId") requestId: string, @Body() body: unknown) { return this.service.externalConfirmUpload(await this.resolveRestaurant(apiKey), requestId, confirmSchema.parse(body)); }
   @Public() @Get("external/reservations/reminder-eligibility") async reminder(@Headers("x-api-key") apiKey: string, @Query("reservationCode") reservationCode: string) { return this.service.reminderEligibility(await this.resolveRestaurant(apiKey, false), reservationCode); }
-  private async resolveRestaurant(apiKey: string, depositsRequired = true) { const token = await this.prisma.integrationToken.findFirst({ where: { tokenHash: hashOpaqueToken(apiKey), isActive: true }, select: { restaurantId: true } }); if (!token) throw new ForbiddenException("Invalid API key"); if (depositsRequired) await requireFeature(this.prisma, token.restaurantId, "deposits"); await requireExternalAccess(this.prisma, token.restaurantId); return token.restaurantId; }
+  @Public()
+  @Post("external/gift-cards/orders/:orderId/proof")
+  async saveGiftCardProof(@Headers("x-api-key") apiKey: string, @Param("orderId") orderId: string, @Body() body: unknown) {
+    const token = await this.resolveIntegrationToken(apiKey);
+    const input = uploadSchema.omit({ size: true }).extend({
+      phone: z.string().trim().min(7).max(40).regex(/^\+?[\d ()-]+$/),
+      messageId: z.string().trim().min(1).max(255),
+      content: z.string().min(1).max(14 * 1024 * 1024).base64()
+    }).parse(body);
+    return this.drive.saveGiftCardProof(token, { ...input, orderId });
+  }
+  private async resolveIntegrationToken(apiKey: string) {
+    const token = await this.prisma.integrationToken.findFirst({
+      where: { tokenHash: hashOpaqueToken(apiKey), isActive: true }, select: { id: true, restaurantId: true }
+    });
+    if (!token) throw new ForbiddenException("Invalid API key");
+    return token;
+  }
+  private async resolveRestaurant(apiKey: string, depositsRequired = true) {
+    const token = await this.resolveIntegrationToken(apiKey);
+    if (depositsRequired) await requireFeature(this.prisma, token.restaurantId, "deposits");
+    await requireExternalAccess(this.prisma, token.restaurantId);
+    return token.restaurantId;
+  }
 }

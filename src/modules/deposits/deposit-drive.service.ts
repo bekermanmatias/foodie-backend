@@ -5,7 +5,8 @@ import { encryptSecret, decryptSecret } from "../../common/security/encrypted-se
 import { restaurantFeatures, requireExternalAccess, requireFeature } from "../../common/restaurant-features";
 import { PrismaService } from "../prisma/prisma.service";
 import { depositActor } from "./deposit-access";
-import { ProofStorageService } from "./proof-storage.service";
+import { normalizeDepositPhone } from "./deposit-rules";
+import { ProofStorageService, verifyProofContent } from "./proof-storage.service";
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
 
@@ -112,6 +113,71 @@ export class DepositDriveService {
   async sync(user: RequestUser, proofId: string) {
     return this.syncForRestaurant(await depositActor(this.prisma, user), proofId);
   }
+  private uploadProof(restaurantId: string, metadata: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, data: Buffer, mimeType: string) {
+    const boundary = randomBytes(16).toString("hex");
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
+      data,
+      Buffer.from(`\r\n--${boundary}--`)
+    ]);
+    return this.api(restaurantId, "upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink", {
+      method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body
+    });
+  }
+  async saveGiftCardProof(token: { id: string; restaurantId: string }, input: {
+    orderId: string; phone: string; messageId: string; fileName: string; mimeType: string; content: string;
+  }) {
+    const { restaurantId } = token;
+    await requireFeature(this.prisma, restaurantId, "giftCards");
+    await requireExternalAccess(this.prisma, restaurantId);
+    const order = await this.prisma.giftCardOrder.findFirst({
+      where: { id: input.orderId, restaurantId }, select: { id: true, purchaserName: true, purchaserPhone: true }
+    });
+    if (!order || normalizeDepositPhone(order.purchaserPhone) !== normalizeDepositPhone(input.phone)) {
+      throw new NotFoundException("Compra de Gift Card no encontrada para este contacto");
+    }
+    const bytes = Buffer.from(input.content, "base64");
+    verifyProofContent(bytes, input.mimeType);
+    const idempotencyKey = createHash("sha256").update(input.messageId).digest("hex");
+    const requestHash = createHash("sha256").update(JSON.stringify([order.id, input.mimeType])).update(bytes).digest("hex");
+    const action = "gift_card.save_proof_to_drive";
+    const where = { restaurantId_action_idempotencyKey: { restaurantId, action, idempotencyKey } };
+    let request = await this.prisma.externalApiRequest.findUnique({ where });
+    const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId }, select: { proofsFolderId: true } });
+    if (!connection?.proofsFolderId) throw new ConflictException("Configurá la carpeta de comprobantes en Foodie");
+    if (!request) {
+      const allocated = await this.api(restaurantId, "drive/v3/files/generateIds?count=1&space=drive");
+      if (!allocated.ids?.[0]) throw new ServiceUnavailableException("Drive no entregó un ID para el comprobante");
+      await this.prisma.externalApiRequest.createMany({
+        skipDuplicates: true,
+        data: { restaurantId, integrationTokenId: token.id, action, idempotencyKey, requestHash,
+          status: "error", responseData: { driveFileId: allocated.ids[0] } }
+      });
+      request = await this.prisma.externalApiRequest.findUniqueOrThrow({ where });
+    }
+    if (request.requestHash !== requestHash) throw new ConflictException("El mensaje ya está asociado a otro comprobante");
+    const recorded = request.responseData as { driveFileId: string; driveFileUrl?: string };
+    if (request.status === "success") return recorded;
+    const lookup = () => this.api(restaurantId, `drive/v3/files/${encodeURIComponent(recorded.driveFileId)}?fields=id,webViewLink`, {}, true);
+    let file = await lookup();
+    if (!file) {
+      try {
+        file = await this.uploadProof(restaurantId, {
+          id: recorded.driveFileId,
+          name: `${order.purchaserName} - ${order.id} - Gift Card - ${input.fileName}`,
+          parents: [connection.proofsFolderId],
+          appProperties: { foodieGiftCardOrderId: order.id, restaurantId }
+        }, bytes, input.mimeType);
+      } catch (error) {
+        // A concurrent attempt or an interrupted response can leave the allocated file in Drive.
+        file = await lookup().catch(() => null);
+        if (!file) throw error;
+      }
+    }
+    const result = { driveFileId: file.id, driveFileUrl: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view` };
+    await this.prisma.externalApiRequest.update({ where: { id: request.id }, data: { status: "success", responseData: result, processedAt: new Date() } });
+    return result;
+  }
   async syncForRestaurant(restaurantId: string, proofId: string) {
     await requireFeature(this.prisma, restaurantId, "deposits");
     const proof = await this.prisma.depositProof.findFirst({ where: { id: proofId, restaurantId }, include: { request: { include: { deposit: { include: { reservation: true } } } } } });
@@ -119,7 +185,8 @@ export class DepositDriveService {
     if (proof.driveStatus === "synced") return proof;
     if ((await restaurantFeatures(this.prisma, restaurantId)).isDemo) return this.prisma.depositProof.update({ where: { id: proof.id }, data: { driveStatus: "simulated", driveError: null } });
     const row = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId } });
-    if (!row?.proofsFolderId) return this.prisma.depositProof.update({ where: { id: proofId }, data: { driveStatus: "failed", driveError: "Configurá la carpeta de comprobantes para sincronizar" } });
+    const folderId = row?.proofsFolderId;
+    if (!folderId) return this.prisma.depositProof.update({ where: { id: proofId }, data: { driveStatus: "failed", driveError: "Configurá la carpeta de comprobantes para sincronizar" } });
     if (!proof.driveFileId) {
       const allocated = await this.api(restaurantId, "drive/v3/files/generateIds?count=1&space=drive");
       await this.prisma.depositProof.updateMany({ where: { id: proofId, driveFileId: null }, data: { driveFileId: allocated.ids[0] } });
@@ -130,14 +197,14 @@ export class DepositDriveService {
       const current = await tx.depositProof.findUniqueOrThrow({ where: { id: proofId } });
       if (current.driveStatus === "synced") return current;
       try {
-        let file = await this.api(restaurantId, `drive/v3/files/${encodeURIComponent(current.driveFileId!)}?fields=id,webViewLink`, {}, true);
+        const driveFileId = current.driveFileId;
+        if (!driveFileId) throw new ServiceUnavailableException("Drive no entregó un ID para el comprobante");
+        let file = await this.api(restaurantId, `drive/v3/files/${encodeURIComponent(driveFileId)}?fields=id,webViewLink`, {}, true);
         if (!file) {
           const data = await this.storage.get(proof.objectKey, false);
           const reservation = proof.request.deposit.reservation;
-          const boundary = randomBytes(16).toString("hex");
-          const metadata = { id: current.driveFileId, name: `${reservation.fullName} - ${reservation.code} - Seña - ${proof.originalName}`, parents: [row.proofsFolderId], appProperties: { foodieProofId: proofId, restaurantId } };
-          const body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${proof.mimeType}\r\n\r\n`), data, Buffer.from(`\r\n--${boundary}--`)]);
-          file = await this.api(restaurantId, "upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink", { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+          const metadata = { id: driveFileId, name: `${reservation.fullName} - ${reservation.code} - Seña - ${proof.originalName}`, parents: [folderId], appProperties: { foodieProofId: proofId, restaurantId } };
+          file = await this.uploadProof(restaurantId, metadata, data, proof.mimeType);
         }
         return tx.depositProof.update({ where: { id: proofId }, data: { driveFileId: file.id, driveFileUrl: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`, driveStatus: "synced", driveError: null } });
       } catch (error) {
