@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 import type { RequestUser } from "../../common/auth/request-user";
+import type { Prisma } from "@prisma/client";
 import { encryptSecret, decryptSecret } from "../../common/security/encrypted-secret";
 import { restaurantFeatures, requireExternalAccess, requireFeature } from "../../common/restaurant-features";
 import { PrismaService } from "../prisma/prisma.service";
@@ -9,12 +10,30 @@ import { normalizeDepositPhone } from "./deposit-rules";
 import { MAX_PROOF_BYTES, ProofStorageService, verifyProofContent } from "./proof-storage.service";
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
-const giftOrderSelect = { id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, product: { select: { name: true } } } as const;
+const giftOrderSelect = {
+  id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, quantity: true,
+  product: { select: { name: true } },
+  giftCards: { select: { status: true, sentAt: true, imageUrl: true } },
+  restaurant: { select: { chatPhoneNumberId: true } }
+} as const;
 type DriveProof = { id: string; name: string; mimeType: string; createdTime: string; appProperties?: Record<string, string> };
 
 function driveProperty(key: string, value: string) {
   const quote = (text: string) => `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
   return `appProperties has { key=${quote(key)} and value=${quote(value)} }`;
+}
+
+function giftProofOrder({ giftCards, quantity, restaurant, ...order }: Prisma.GiftCardOrderGetPayload<{ select: typeof giftOrderSelect }>) {
+  const active = giftCards.filter(card => card.status === "ACTIVE");
+  return {
+    ...order,
+    delivery: {
+      ready: giftCards.length === quantity && active.length > 0 && active.every(card => Boolean(card.imageUrl)),
+      channelConfigured: Boolean(restaurant.chatPhoneNumberId?.trim()),
+      sent: active.filter(card => Boolean(card.sentAt)).length,
+      total: active.length
+    }
+  };
 }
 
 @Injectable()
@@ -157,7 +176,7 @@ export class DepositDriveService {
       const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[] };
       files.push(...(result.files ?? []));
     }
-    const byOrder = new Map(orders.map(order => [order.id, order]));
+    const byOrder = new Map(orders.map(order => [order.id, giftProofOrder(order)]));
     return files.sort((a, b) => b.createdTime.localeCompare(a.createdTime)).flatMap(({ appProperties, ...file }) => {
       const order = byOrder.get(appProperties?.foodieGiftCardOrderId ?? "");
       if (!order || appProperties?.restaurantId !== restaurantId) return [];
@@ -179,7 +198,7 @@ export class DepositDriveService {
     const orders = ids.length ? await this.prisma.giftCardOrder.findMany({
       where: { restaurantId, id: { in: ids } }, select: giftOrderSelect
     }) : [];
-    const byOrder = new Map(orders.map(order => [order.id, order]));
+    const byOrder = new Map(orders.map(order => [order.id, giftProofOrder(order)]));
     const items = files.flatMap(({ appProperties, ...file }) => {
       const order = byOrder.get(appProperties!.foodieGiftCardOrderId);
       return order ? [{ ...file, order }] : [];
