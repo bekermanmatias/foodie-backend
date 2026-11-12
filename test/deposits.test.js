@@ -85,3 +85,42 @@ test("reservation deposit search stays inside the restaurant and combines paymen
   assert.equal(where.reservation.OR[0].fullName.contains, "MATIAS");
   assert.ok(where.dueAt.lt instanceof Date);
 });
+
+test("Drive names a new root after the authenticated restaurant and reuses saved folder IDs", async () => {
+  const owner = { scope: "restaurant", role: "restaurant_owner", restaurantId: "restaurant-1" };
+  let connection;
+  const folders = [];
+  const prisma = {
+    restaurant: {
+      findUnique: async () => ({ featureOverrides: { deposits: true }, isDemo: false }),
+      findUniqueOrThrow: async ({ where }) => {
+        assert.equal(where.id, owner.restaurantId);
+        return { name: " DEMO FOODIE " };
+      }
+    },
+    restaurantDriveConnection: {
+      findUnique: async () => connection,
+      upsert: async ({ create, update }) => { connection = connection ? { ...connection, ...update } : create; }
+    }
+  };
+  const service = new DepositDriveService(prisma);
+  service.api = async (restaurantId, path, init) => {
+    assert.equal(restaurantId, owner.restaurantId);
+    if (init?.method === "POST") {
+      const folder = { id: `folder-${folders.length + 1}`, ...JSON.parse(init.body) };
+      folders.push(folder);
+      return folder;
+    }
+    const query = new URL(path, "https://www.googleapis.com").searchParams.get("q");
+    return { files: folders.filter(folder => folder.parents && query.includes(`name='${folder.name}'`)) };
+  };
+
+  const first = await service.setup(owner);
+  assert.deepEqual(folders.map(({ name, parents }) => [name, parents]), [
+    ["FOODIE - DEMO FOODIE", undefined],
+    ["Comprobantes", [first.rootFolderId]],
+    ["Archivos generales", [first.rootFolderId]]
+  ]);
+  assert.deepEqual(await service.setup(owner), first);
+  assert.equal(folders.length, 3);
+});

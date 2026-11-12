@@ -129,7 +129,7 @@ export class DepositDriveService {
     const restaurantId = await depositActor(this.prisma, user, true);
     const demo = (await restaurantFeatures(this.prisma, restaurantId)).isDemo;
     const prior = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId } });
-    const create = async (name: string, parent?: string) => {
+    const create = async (name: string, parent?: string): Promise<{ id: string }> => {
       if (demo) return { id: `demo-${name}` };
       if (parent) {
         const existing = await this.api(restaurantId, `drive/v3/files?${new URLSearchParams({ q: `trashed=false and mimeType='application/vnd.google-apps.folder' and name='${name}' and '${parent.replace(/'/g, "\\'")}' in parents`, fields: "files(id)", pageSize: "1" })}`);
@@ -141,7 +141,13 @@ export class DepositDriveService {
       const folder = await this.api(restaurantId, `drive/v3/files/${encodeURIComponent(rootId)}?fields=id,mimeType,trashed,capabilities(canAddChildren)`);
       if (folder.trashed || folder.mimeType !== "application/vnd.google-apps.folder" || !folder.capabilities?.canAddChildren) throw new BadRequestException("Seleccioná una carpeta con permiso de escritura");
     }
-    const root = rootId || (prior?.status === "simulated" ? null : prior?.rootFolderId) || (await create("Foodie")).id;
+    let root = rootId || (prior?.status === "simulated" ? null : prior?.rootFolderId);
+    if (!root) {
+      const { name } = await this.prisma.restaurant.findUniqueOrThrow({
+        where: { id: restaurantId }, select: { name: true }
+      });
+      root = (await create(`FOODIE - ${name.trim()}`)).id;
+    }
     const proof = await create("Comprobantes", root); const general = await create("Archivos generales", root);
     const data = { rootFolderId: root, proofsFolderId: proof.id, generalFolderId: general.id, status: demo ? "simulated" : "connected", error: null };
     await this.prisma.restaurantDriveConnection.upsert({ where: { restaurantId }, create: { restaurantId, ...data }, update: data });
