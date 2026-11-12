@@ -10,6 +10,40 @@ const buyer = { productId: 'product-1', type: 'FIXED_MENU', purchaserName: 'Ayel
 const audit = { log: async () => {} };
 const owner = { sub: 'owner-1', scope: 'restaurant', restaurantId: 'restaurant-1', role: 'restaurant_owner' };
 
+test('refreshing legacy artwork is scoped to the owner and preserves the issued card', async () => {
+  const code = 'ABCDEFGH';
+  const date = new Date('2026-12-31');
+  const card = {
+    id: 'card-1', restaurantId: owner.restaurantId, orderId: 'order-1', displayCode: code,
+    status: 'ACTIVE', validFrom: date, validUntil: date, sentAt: date,
+    imageUrl: '/uploads/gift-cards/restaurant-1/order-1/gift-card-ABCDEFGH.png',
+    order: { id: 'order-1', restaurantId: owner.restaurantId, restaurant: { name: 'Demo Foodie' } }
+  };
+  const assets = { imageUrl: '/new-card.png', pdfUrl: '/new-card.pdf' };
+  const service = new GiftCardsService({
+    restaurant: { findUnique: async () => ({ featureOverrides: {} }) },
+    giftCard: {
+      findFirst: async ({ where }) => where.id === card.id && where.restaurantId === card.restaurantId ? card : null,
+      update: async ({ where, data }) => {
+        assert.deepEqual(where, { id: card.id, restaurantId: owner.restaurantId });
+        assert.deepEqual(data, assets);
+        return { ...card, ...data };
+      }
+    }
+  }, audit);
+  service.generateAssets = async (order, displayCode, validUntil) => {
+    assert.equal(order.restaurant.name, 'Demo Foodie');
+    assert.equal(displayCode, code);
+    assert.equal(validUntil, date);
+    return assets;
+  };
+  await assert.rejects(service.refreshArtwork({ ...owner, restaurantId: 'another-restaurant' }, card.id), /no encontrada/);
+  const updated = await service.refreshArtwork(owner, card.id);
+  assert.equal(updated.code, code);
+  assert.equal(updated.sentAt, date);
+  assert.equal(updated.needsArtworkUpdate, false);
+});
+
 test('quantity defaults to one and three cards have one total', async () => {
   const prisma = { restaurant: { findUnique: async () => ({ isDemo: false, featureOverrides: {} }) }, giftCardProduct: { findFirst: async () => product() } };
   const service = new GiftCardsService(prisma, audit);

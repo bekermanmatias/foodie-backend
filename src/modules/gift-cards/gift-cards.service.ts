@@ -37,6 +37,11 @@ const escapeXml = (value: string) => value.replace(/[<>&"']/g, (character) => ({
 const GIFT_CARD_TEXT_ANGLE = -4;
 const GIFT_CARD_RIGHT_BLOCK = { centerX: 775, centerY: 875, width: 330, height: 260, topPadding: 14, bottomPadding: 14, codeHeight: 28, sectionGap: 8, codeGap: 12 };
 const GIFT_CARD_DATE_BLOCK = { centerX: 380, centerY: 978, width: 240, height: 80, dateBaseline: 978 };
+const ESTILO_CAMPO_ID = "cmougo5l70001e04moof2uvls";
+
+function needsArtworkUpdate(card: { restaurantId: string; orderId: string; displayCode: string; imageUrl?: string | null }) {
+  return card.restaurantId !== ESTILO_CAMPO_ID && card.imageUrl === `/uploads/gift-cards/${card.restaurantId}/${card.orderId}/gift-card-${card.displayCode}.png`;
+}
 
 type GiftCardPrintLine = { text: string; fontSize: number; lineHeight: number; marginBefore: number; className: "gift-card-value" | "gift-card-description" };
 type GiftCardFlow = { lines: GiftCardPrintLine[]; codeBaseline: number };
@@ -149,12 +154,13 @@ export class GiftCardsService {
   }
 
   async previewProduct(user: RequestUser, input: ProductInput) {
-    await this.owner(user);
+    const restaurantId = await this.owner(user);
+    const restaurant = await this.prisma.restaurant.findUniqueOrThrow({ where: { id: restaurantId }, select: { name: true } });
     this.validateProduct(input);
     const validUntil = new Date();
     validUntil.setUTCDate(validUntil.getUTCDate() + input.validityDays);
     const amount = input.type === "FIXED_MENU" ? input.price! : input.minAmount || 10000;
-    const image = await this.renderGiftCard({ type: input.type, product: input, amount, currency: input.currency || "ARS" }, "MUESTRA1", validUntil);
+    const image = await this.renderGiftCard({ restaurantId, restaurant, type: input.type, product: input, amount, currency: input.currency || "ARS" }, "MUESTRA1", validUntil);
     return { image: `data:image/png;base64,${image.toString("base64")}` };
   }
 
@@ -193,7 +199,7 @@ export class GiftCardsService {
 
   private absoluteAsset(value: string | null | undefined) { if (!value) return null; return value.startsWith("http") ? value : `${process.env.PUBLIC_API_ORIGIN || "http://localhost:4000"}${value}`; }
 
-  private giftCardView(card: any) { return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: this.absoluteAsset(card.imageUrl), pdfUrl: this.absoluteAsset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt, sentAt: card.sentAt }; }
+  private giftCardView(card: any) { return { id: card.id, code: card.displayCode, status: card.status, originalAmount: money(card.originalAmount), currency: card.currency, validFrom: dateOnly(card.validFrom), validUntil: dateOnly(card.validUntil), imageUrl: this.absoluteAsset(card.imageUrl), pdfUrl: this.absoluteAsset(card.pdfUrl), issuedAt: card.issuedAt, redeemedAt: card.redeemedAt, sentAt: card.sentAt, needsArtworkUpdate: needsArtworkUpdate(card) }; }
 
   private async resolveOrder(restaurantId: string, input: OrderInput) {
     const quantity = input.quantity ?? 1;
@@ -342,7 +348,7 @@ export class GiftCardsService {
 
   async confirmPayment(user: RequestUser, orderId: string, approved: boolean, reference?: string) {
     const restaurantId = await this.owner(user);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, restaurant: { select: { name: true } }, giftCards: { orderBy: { createdAt: "asc" } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     const issuedView = (cards: typeof order.giftCards) => ({ order: order.id, giftCards: cards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && cards[0] ? this.giftCardView(cards[0]) : null });
     if (order.paymentStatus === "CONFIRMED" && order.giftCards.length === order.quantity) return issuedView(order.giftCards);
@@ -378,10 +384,23 @@ export class GiftCardsService {
     return issuedView(issued);
   }
 
+  async refreshArtwork(user: RequestUser, cardId: string) {
+    const restaurantId = await this.owner(user);
+    const card = await this.prisma.giftCard.findFirst({
+      where: { id: cardId, restaurantId },
+      include: { order: { include: { product: true, restaurant: { select: { name: true } } } } }
+    });
+    if (!card) throw new NotFoundException("Gift Card no encontrada");
+    if (!needsArtworkUpdate(card)) return this.giftCardView(card);
+    const assets = await this.generateAssets(card.order, card.displayCode, card.validUntil);
+    const updated = await this.prisma.giftCard.update({ where: { id: card.id, restaurantId }, data: assets });
+    return this.giftCardView(updated);
+  }
+
   async sendGiftCard(user: RequestUser, orderId: string, resend = false) {
     const restaurantId = await this.owner(user);
     await requireExternalAccess(this.prisma, restaurantId);
-    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { giftCards: { orderBy: { createdAt: "asc" } }, restaurant: { select: { chatPhoneNumberId: true } } } });
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { id: orderId, restaurantId }, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } }, restaurant: { select: { name: true, chatPhoneNumberId: true } } } });
     if (!order) throw new NotFoundException("Gift Card order not found");
     if (order.giftCards.length !== order.quantity) throw new ConflictException("La compra todavía no tiene todas las Gift Cards emitidas");
     const activeCards = order.giftCards.filter((card) => card.status === GiftCardStatus.ACTIVE);
@@ -394,9 +413,15 @@ export class GiftCardsService {
     if (!webhookUrl) throw new ConflictException("Falta configurar el envío de Gift Cards para el canal de este restaurante");
     const webhookToken = n8nWebhookToken();
     for (const card of pending) {
+      let imageUrl = card.imageUrl;
+      if (needsArtworkUpdate(card)) {
+        const assets = await this.generateAssets(order, card.displayCode, card.validUntil);
+        await this.prisma.giftCard.update({ where: { id: card.id, restaurantId }, data: assets });
+        imageUrl = assets.imageUrl;
+      }
       let result: { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null = null;
       try {
-        const response = await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-n8n-token": webhookToken }, body: JSON.stringify({ clientId, phoneNumber: order.purchaserPhone, imageUrl: this.absoluteAsset(card.imageUrl), caption: `¡Tu Gift Card está lista! Código: ${card.displayCode}.`, orderId: order.id, restaurantId, code: card.displayCode }) });
+        const response = await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-n8n-token": webhookToken }, body: JSON.stringify({ clientId, phoneNumber: order.purchaserPhone, imageUrl: this.absoluteAsset(imageUrl), caption: `¡Tu Gift Card está lista! Código: ${card.displayCode}.`, orderId: order.id, restaurantId, code: card.displayCode }) });
         result = (await response.json().catch(() => null)) as { sent?: boolean; reason?: string | null; lastInboundAt?: string | null } | null;
         if (!response.ok) throw new Error(`n8n respondió ${response.status}`);
       } catch (error) {
@@ -479,6 +504,25 @@ export class GiftCardsService {
     const includeDescriptionInPrint = order.product?.restrictions?.includeDescriptionInPrint === true;
     const description = includeDescriptionInPrint ? order.product?.description?.trim() : undefined;
     const date = displayDate(validUntil); const flow = giftCardFlow(value, order.type, description);
+    if (order.restaurantId !== ESTILO_CAMPO_ID) {
+      const name = String(order.restaurant?.name || "Gift Card");
+      const nameSize = Math.min(44, Math.floor(840 / approximateTextWidth(name, 1)));
+      let baseline = 12;
+      const lines = flow.lines.map(line => {
+        baseline += line.marginBefore + line.lineHeight;
+        return `<text x="165" y="${baseline}" font-size="${line.fontSize}" font-weight="${line.className === "gift-card-value" ? 800 : 500}">${escapeXml(line.text)}</text>`;
+      }).join("");
+      const artwork = `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1440" font-family="Montserrat, sans-serif" text-anchor="middle" fill="#27211b">
+        <rect width="1080" height="1440" fill="#f7eee2"/><rect x="64" y="64" width="952" height="1312" rx="42" fill="#fffaf3" stroke="#d1ad81" stroke-width="3"/>
+        <text x="540" y="235" font-size="${nameSize}" font-weight="700">${escapeXml(name)}</text>
+        <text x="540" y="370" font-family="Playfair Display, serif" font-size="96" font-weight="800">Gift Card</text>
+        <path d="M200 445h680" stroke="#d1ad81" stroke-width="3"/>
+        <g transform="translate(177 492) scale(2.2)">${lines}</g>
+        <text x="540" y="1155" font-size="46" font-weight="700" letter-spacing="5">${escapeXml(code.toUpperCase())}</text>
+        <text x="540" y="1264" font-size="30">Válida hasta ${escapeXml(date)}</text>
+      </svg>`;
+      return sharp(Buffer.from(artwork)).png().toBuffer();
+    }
     let contentOffset = GIFT_CARD_RIGHT_BLOCK.topPadding;
     const rightTop = GIFT_CARD_RIGHT_BLOCK.centerY - (GIFT_CARD_RIGHT_BLOCK.height / 2);
     const dateTop = GIFT_CARD_DATE_BLOCK.centerY - (GIFT_CARD_DATE_BLOCK.height / 2);
@@ -495,8 +539,9 @@ export class GiftCardsService {
   private async generateAssets(order: any, code: string, validUntil: Date) {
     const directory = join(process.cwd(), "uploads", "gift-cards", order.restaurantId, order.id); await mkdir(directory, { recursive: true });
     const renderedImage = await this.renderGiftCard(order, code, validUntil);
-    const imageFile = `gift-card-${code}.png`; const imagePath = join(directory, imageFile); await writeFile(imagePath, renderedImage);
-    const pdfFile = `gift-card-${code}.pdf`; const pdfPath = join(directory, pdfFile);
+    const fileName = `gift-card-${code}${order.restaurantId === ESTILO_CAMPO_ID ? "" : "-foodie-v1"}`;
+    const imageFile = `${fileName}.png`; const imagePath = join(directory, imageFile); await writeFile(imagePath, renderedImage);
+    const pdfFile = `${fileName}.pdf`; const pdfPath = join(directory, pdfFile);
     await new Promise<void>((resolve, reject) => { const doc = new PDFDocument({ size: [540, 720], margin: 0 }); const chunks: Buffer[] = []; doc.on("data", (chunk: Buffer) => chunks.push(chunk)); doc.on("end", async () => { try { await writeFile(pdfPath, Buffer.concat(chunks)); resolve(); } catch (error) { reject(error); } }); doc.on("error", reject); doc.image(renderedImage, 0, 0, { width: 540, height: 720 }); doc.end(); });
     const base = `/uploads/gift-cards/${order.restaurantId}/${order.id}`; return { imageUrl: `${base}/${imageFile}`, pdfUrl: `${base}/${pdfFile}` };
   }

@@ -47,6 +47,7 @@ export class GiftCardsController {
   @Post("restaurant/gift-cards/orders/:id/cancel") cancel(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.cancelOrder(user, id); }
   @Roles("restaurant_owner")
   @Post("restaurant/gift-cards/cards/:id/cancel") cancelCard(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.cancelCard(user, id); }
+  @Post("restaurant/gift-cards/cards/:id/refresh-artwork") refreshArtwork(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.refreshArtwork(user, id); }
   @Roles("restaurant_owner")
   @Delete("restaurant/gift-cards/orders/:id") delete(@CurrentUser() user: RequestUser, @Param("id") id: string) { return this.service.deleteOrder(user, id); }
   @Roles("restaurant_owner", "host", "events")
