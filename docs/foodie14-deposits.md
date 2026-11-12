@@ -86,7 +86,7 @@ Variables del backend:
 
 - Las variables R2 existentes: `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
   `R2_SECRET_ACCESS_KEY`.
-- `CHAT_CREDENTIAL_SECRET`: clave estable para cifrar tokens; requerida para OAuth.
+- `GOOGLE_DRIVE_ENCRYPTION_SECRET`: clave estable para cifrar los tokens nuevos de Drive. Las instalaciones que ya usan `CHAT_CREDENTIAL_SECRET` pueden conservarla para leer sus tokens anteriores.
 - `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`.
 - `GOOGLE_DRIVE_REDIRECT_URI`: URL registrada en Google, con la ruta
   `/v1/external/deposits/drive/callback` del backend público.

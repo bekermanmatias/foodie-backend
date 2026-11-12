@@ -7,12 +7,25 @@ import { PrismaService } from "../prisma/prisma.service";
 import { depositActor } from "./deposit-access";
 import { ProofStorageService } from "./proof-storage.service";
 
+const DRIVE_TOKEN_PREFIX = "drive-v1:";
+
 @Injectable()
 export class DepositDriveService {
   constructor(private readonly prisma: PrismaService, private readonly storage: ProofStorageService) {}
   private credentials() {
-    if (!process.env.GOOGLE_DRIVE_CLIENT_ID || !process.env.GOOGLE_DRIVE_CLIENT_SECRET || !process.env.GOOGLE_DRIVE_REDIRECT_URI || !process.env.CHAT_CREDENTIAL_SECRET) throw new ServiceUnavailableException("Falta configurar la aplicación OAuth de Google Drive");
+    if (!process.env.GOOGLE_DRIVE_CLIENT_ID || !process.env.GOOGLE_DRIVE_CLIENT_SECRET || !process.env.GOOGLE_DRIVE_REDIRECT_URI || !(process.env.GOOGLE_DRIVE_ENCRYPTION_SECRET || process.env.CHAT_CREDENTIAL_SECRET)) throw new ServiceUnavailableException("Falta configurar la aplicación OAuth de Google Drive");
     return { client_id: process.env.GOOGLE_DRIVE_CLIENT_ID, client_secret: process.env.GOOGLE_DRIVE_CLIENT_SECRET, redirect_uri: process.env.GOOGLE_DRIVE_REDIRECT_URI };
+  }
+  private encryptRefreshToken(token: string) {
+    const secret = process.env.GOOGLE_DRIVE_ENCRYPTION_SECRET;
+    if (secret) return DRIVE_TOKEN_PREFIX + encryptSecret(token, secret);
+    return encryptSecret(token);
+  }
+  private decryptRefreshToken(token: string) {
+    if (!token.startsWith(DRIVE_TOKEN_PREFIX)) return decryptSecret(token);
+    const secret = process.env.GOOGLE_DRIVE_ENCRYPTION_SECRET;
+    if (!secret) throw new ServiceUnavailableException("Falta la clave de cifrado de Google Drive");
+    return decryptSecret(token.slice(DRIVE_TOKEN_PREFIX.length), secret);
   }
   async status(user: RequestUser) {
     const restaurantId = await depositActor(this.prisma, user);
@@ -43,14 +56,14 @@ export class DepositDriveService {
     const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body: new URLSearchParams({ ...this.credentials(), code, grant_type: "authorization_code" }), signal: AbortSignal.timeout(20000) });
     const data = await response.json() as { refresh_token?: string };
     if (!response.ok || !data.refresh_token) throw new BadRequestException("Google no entregó autorización para acceso sin conexión; intentá reconectar");
-    await this.prisma.restaurantDriveConnection.update({ where: { restaurantId: connection.restaurantId }, data: { encryptedRefreshToken: encryptSecret(data.refresh_token), status: "connected", error: null } });
+    await this.prisma.restaurantDriveConnection.update({ where: { restaurantId: connection.restaurantId }, data: { encryptedRefreshToken: this.encryptRefreshToken(data.refresh_token), status: "connected", error: null } });
     return { connected: true, message: "Google Drive conectado. Podés cerrar esta ventana y volver a Foodie." };
   }
   private async api(restaurantId: string, suffix: string, init: RequestInit = {}, allowMissing = false) {
     await requireExternalAccess(this.prisma, restaurantId);
     const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId } });
     if (!connection?.encryptedRefreshToken) throw new ConflictException("Conectá Google Drive primero");
-    const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body: new URLSearchParams({ ...this.credentials(), refresh_token: decryptSecret(connection.encryptedRefreshToken), grant_type: "refresh_token" }), signal: AbortSignal.timeout(20000) });
+    const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body: new URLSearchParams({ ...this.credentials(), refresh_token: this.decryptRefreshToken(connection.encryptedRefreshToken), grant_type: "refresh_token" }), signal: AbortSignal.timeout(20000) });
     const token = await response.json() as { access_token?: string };
     if (!response.ok || !token.access_token) {
       await this.prisma.restaurantDriveConnection.update({ where: { restaurantId }, data: { status: "reconnect_required", error: "La autorización de Google venció o fue revocada" } });
