@@ -10,8 +10,9 @@ import { depositActor } from "./deposit-access";
 import { EMPTY_SETTINGS, settingsSchema, calculateDeposit, normalizeDepositPhone } from "./deposit-rules";
 import { ProofStorageService, MAX_PROOF_BYTES, verifyProofContent } from "./proof-storage.service";
 import { DepositDriveService } from "./deposit-drive.service";
+import { depositPage, depositPageArgs } from "./deposit-pagination";
 
-const detail = { reservation: { include: { branch: true, tables: { include: { table: true } } } }, entries: { orderBy: { createdAt: "desc" as const } }, proofRequests: { include: { proofs: true }, orderBy: { createdAt: "desc" as const } } };
+const reservationSummary = { id: true, code: true, fullName: true, phone: true, serviceDate: true, serviceTime: true, status: true } as const;
 type Upload = { fileName: string; mimeType: string; size: number };
 type Entry = { type: "payment" | "refund" | "adjustment"; amount: number; paidAt: string; paymentMethod: string; reference?: string; notes?: string; proofIds?: string[]; idempotencyKey: string };
 @Injectable()
@@ -46,13 +47,13 @@ export class DepositsService {
       return config;
     });
   }
-  async list(user: RequestUser, input: { branchId?: string; status?: string; phone?: string; reservationId?: string; from?: string; to?: string; review?: string; expired?: boolean; search?: string } = {}) {
+  async list(user: RequestUser, input: { branchId?: string; status?: string; phone?: string; reservationId?: string; from?: string; to?: string; review?: string; expired?: boolean; search?: string; page?: number } = {}) {
     const restaurantId = await depositActor(this.prisma, user);
     const phone = input.phone ? normalizeDepositPhone(input.phone) : null;
     if (phone !== null && phone.length < 7) throw new BadRequestException("Teléfono incompleto");
     // Normalize both sides in the database; punctuation never changes contact ownership.
     const contactIds = phone ? await this.prisma.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Reservation" WHERE "restaurantId"=${restaurantId} AND regexp_replace(phone, '[^0-9]', '', 'g')=${phone}` : null;
-    return this.prisma.reservationDeposit.findMany({ where: { restaurantId,
+    const rows = await this.prisma.reservationDeposit.findMany({ where: { restaurantId,
       ...(input.branchId ? { branchId: input.branchId } : {}), ...(input.reservationId ? { reservationId: input.reservationId } : {}),
       status: { equals: input.status as "pending" | "partial" | "complete" | undefined, not: input.expired ? "complete" : undefined },
       ...(input.expired ? { dueAt: { lt: new Date() } } : {}),
@@ -64,18 +65,57 @@ export class DepositsService {
           { phone: { contains: input.search } }
         ] } : {}),
         ...((input.from || input.to) ? { serviceDate: { ...(input.from ? { gte: new Date(`${input.from}T00:00:00Z`) } : {}), ...(input.to ? { lte: new Date(`${input.to}T23:59:59Z`) } : {}) } } : {}) }
-    }, include: detail, orderBy: { updatedAt: "desc" }, take: 200 });
+    }, include: input.page === undefined
+      ? { reservation: true, entries: { orderBy: { createdAt: "desc" } }, proofRequests: { include: { proofs: true }, orderBy: { createdAt: "desc" } } }
+      : { reservation: { select: reservationSummary }, _count: { select: { entries: true, proofRequests: true } } },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }], ...depositPageArgs(input.page ?? 1) });
+    const result = depositPage(rows);
+    return input.page === undefined ? result.items : result;
   }
-  async reservationOptions(user: RequestUser, search: string) {
+  async proofs(user: RequestUser, depositId: string, page: number, review?: string) {
     const restaurantId = await depositActor(this.prisma, user);
-    if (!search || search.trim().length < 2) return [];
-    return this.prisma.reservation.findMany({ where: { restaurantId, status: { in: ["pending", "confirmed"] }, OR: [{ code: { contains: search.trim(), mode: "insensitive" } }, { fullName: { contains: search.trim(), mode: "insensitive" } }, { phone: { contains: search.trim() } }] }, select: { id: true, code: true, fullName: true, serviceDate: true, deposit: { select: { id: true } } }, take: 100, orderBy: { serviceDate: "desc" } });
+    return depositPage(await this.prisma.depositProof.findMany({
+      where: { restaurantId, reviewStatus: review, request: { depositId, deposit: { restaurantId } } },
+      select: { id: true, originalName: true, receivedAt: true, reviewStatus: true, rejectionReason: true, driveStatus: true, driveError: true, driveFileUrl: true },
+      orderBy: [{ receivedAt: "desc" }, { id: "desc" }], ...depositPageArgs(page)
+    }));
   }
-  async contactReservations(user: RequestUser, phone: string) {
+  async movements(user: RequestUser, depositId: string, page: number) {
+    const restaurantId = await depositActor(this.prisma, user);
+    return depositPage(await this.prisma.depositEntry.findMany({
+      where: { depositId, deposit: { restaurantId } },
+      select: { id: true, type: true, amount: true, paidAt: true, reference: true, notes: true },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], ...depositPageArgs(page)
+    }));
+  }
+  async reservationOptions(user: RequestUser, search: string, page?: number) {
+    const restaurantId = await depositActor(this.prisma, user);
+    const term = search?.trim();
+    const rows = term && term.length >= 2 ? await this.prisma.reservation.findMany({
+      where: { restaurantId, deposit: null, status: { in: ["pending", "confirmed"] }, OR: [
+        { code: { contains: term, mode: "insensitive" } },
+        { fullName: { contains: term, mode: "insensitive" } },
+        { phone: { contains: term } }
+      ] },
+      select: { id: true, code: true, fullName: true, serviceDate: true },
+      orderBy: [{ serviceDate: "desc" }, { id: "desc" }], ...depositPageArgs(page ?? 1)
+    }) : [];
+    const result = depositPage(rows);
+    return page === undefined ? result.items : result;
+  }
+  async contactReservations(user: RequestUser, phone: string, page?: number) {
     const restaurantId = await depositActor(this.prisma, user); const normalized = normalizeDepositPhone(phone);
     if (normalized.length < 7) throw new BadRequestException("Teléfono incompleto");
-    const ids = await this.prisma.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Reservation" WHERE "restaurantId"=${restaurantId} AND regexp_replace(phone, '[^0-9]', '', 'g')=${normalized} AND status IN ('pending','confirmed') ORDER BY "serviceDate" DESC LIMIT 100`;
-    return this.prisma.reservation.findMany({ where: { id: { in: ids.map((row) => row.id) }, restaurantId }, include: { deposit: true }, orderBy: { serviceDate: "desc" } });
+    const { skip, take } = depositPageArgs(page ?? 1);
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; code: string; fullName: string; serviceDate: Date }>>`
+      SELECT r.id, r.code, r."fullName", r."serviceDate" FROM "Reservation" r
+      WHERE r."restaurantId"=${restaurantId} AND regexp_replace(r.phone, '[^0-9]', '', 'g')=${normalized}
+        AND r.status IN ('pending','confirmed')
+        AND NOT EXISTS (SELECT 1 FROM "ReservationDeposit" d WHERE d."reservationId"=r.id)
+      ORDER BY r."serviceDate" DESC, r.id DESC LIMIT ${take} OFFSET ${skip}
+    `;
+    const result = depositPage(rows);
+    return page === undefined ? result.items : result;
   }
   async upsert(user: RequestUser, reservationId: string, input: { requiredAmount?: number; notes?: string; currency?: string; dueAt?: string; useRules?: boolean }) {
     const restaurantId = await depositActor(this.prisma, user);

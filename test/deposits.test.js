@@ -54,6 +54,7 @@ test("Gift Card history filters Drive dates and searches authorized orders befor
     assert.equal(restaurantId, owner.restaurantId);
     const query = new URL(path, "https://drive.googleapis.com").searchParams;
     assert.equal(query.get("pageToken"), "requested");
+    assert.equal(query.get("pageSize"), "10");
     assert.ok(query.get("q").includes(`createdTime >= '${from}' and createdTime < '${before}'`));
     const file = (id, orderId, restaurantId) => ({ id, appProperties: { foodieGiftCardOrderId: orderId, restaurantId } });
     return { nextPageToken: "older", files: [
@@ -123,4 +124,36 @@ test("Drive names a new root after the authenticated restaurant and reuses saved
   ]);
   assert.deepEqual(await service.setup(owner), first);
   assert.equal(folders.length, 3);
+});
+
+test("deposit lists and nested histories return ten rows and indicate when there is a next page", async () => {
+  const owner = { scope: "restaurant", role: "restaurant_owner", restaurantId: "restaurant-1" };
+  const rows = Array.from({ length: 11 }, (_, index) => ({ id: String(index) }));
+  const calls = [];
+  const findMany = async query => { calls.push(query); return rows; };
+  const prisma = {
+    restaurant: { findUnique: async () => ({ featureOverrides: { deposits: true } }) },
+    reservationDeposit: { findMany },
+    depositProof: { findMany },
+    depositEntry: { findMany }
+  };
+  const deposits = new DepositsService(prisma);
+  const drive = new DepositDriveService(prisma);
+  for (const result of [
+    await deposits.list(owner, { page: 2 }),
+    await deposits.proofs(owner, "deposit-1", 2, "pending"),
+    await deposits.movements(owner, "deposit-1", 2),
+    await drive.files(owner, "proofs", undefined, 2, "Matias")
+  ]) {
+    assert.deepEqual(result, { items: rows.slice(0, 10), hasNext: true });
+  }
+  for (const query of calls) {
+    assert.equal(query.skip, 10);
+    assert.equal(query.take, 11);
+    assert.equal(query.where.restaurantId ?? query.where.deposit.restaurantId, owner.restaurantId);
+  }
+  assert.equal(calls[0].include.entries, undefined);
+  assert.equal(calls[0].include.proofRequests, undefined);
+  assert.equal(calls[1].where.reviewStatus, "pending");
+  assert.equal(calls[3].where.OR[0].originalName.contains, "Matias");
 });

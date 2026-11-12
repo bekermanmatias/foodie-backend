@@ -17,18 +17,19 @@ const entrySchema = z.object({ type: z.enum(["payment", "refund", "adjustment"])
 const uploadSchema = z.object({ fileName: z.string().min(1).max(255), mimeType: z.enum(["application/pdf", "image/jpeg", "image/png", "image/webp"]), size: z.number().int().positive().max(10 * 1024 * 1024) });
 const confirmSchema = uploadSchema.extend({ objectKey: z.string().min(1), messageId: z.string().max(255).optional(), caption: z.string().max(2000).optional() });
 const proofReview = z.enum(["pending", "approved", "rejected"]);
+const pageNumber = z.coerce.number().int().min(1).max(100000).optional();
 
 @Controller()
 export class DepositsController {
   constructor(private readonly service: DepositsService, private readonly prisma: PrismaService, private readonly drive: DepositDriveService) {}
   @Get("restaurant/deposits") list(@CurrentUser() user: RequestUser, @Query() query: Record<string, string>) {
-    const parsed = z.object({ branchId: z.string().optional(), status: z.enum(["pending", "partial", "complete"]).optional(), phone: z.string().optional(), reservationId: z.string().optional(), from: z.string().date().optional(), to: z.string().date().optional(), review: proofReview.optional(), search: z.string().trim().max(120).optional(), expired: z.enum(["true", "false"]).optional().transform((value) => value === "true") }).parse(query);
+    const parsed = z.object({ branchId: z.string().optional(), status: z.enum(["pending", "partial", "complete"]).optional(), phone: z.string().optional(), reservationId: z.string().optional(), from: z.string().date().optional(), to: z.string().date().optional(), review: proofReview.optional(), search: z.string().trim().max(120).optional(), expired: z.enum(["true", "false"]).optional().transform((value) => value === "true"), page: pageNumber }).parse(query);
     return this.service.list(user, parsed);
   }
   @Get("restaurant/deposits/events") async events(@CurrentUser() user: RequestUser) { const restaurantId = await depositActor(this.prisma, user); return this.prisma.specialService.findMany({ where: { restaurantId }, select: { id: true, label: true, serviceDate: true }, orderBy: { serviceDate: "desc" }, take: 200 }); }
-  @Get("restaurant/deposits/reservation-options") options(@CurrentUser() user: RequestUser, @Query("search") search: string) { return this.service.reservationOptions(user, search); }
+  @Get("restaurant/deposits/reservation-options") options(@CurrentUser() user: RequestUser, @Query("search") search: string, @Query("page") page?: string) { return this.service.reservationOptions(user, search, pageNumber.parse(page)); }
   @Post("restaurant/deposits/:depositId/resolve-delivery") resolveDelivery(@CurrentUser() user: RequestUser, @Param("depositId") id: string, @Body() body: unknown) { const input = z.object({ outcome: z.enum(["sent", "not_sent"]), reference: z.string().trim().min(1).max(500) }).parse(body); return this.service.resolveDelivery(user, id, input.outcome, input.reference); }
-  @Get("restaurant/deposits/contact-reservations") contact(@CurrentUser() user: RequestUser, @Query("phone") phone: string) { return this.service.contactReservations(user, phone); }
+  @Get("restaurant/deposits/contact-reservations") contact(@CurrentUser() user: RequestUser, @Query("phone") phone: string, @Query("page") page?: string) { return this.service.contactReservations(user, phone, pageNumber.parse(page)); }
   @Get("restaurant/deposits/settings") settings(@CurrentUser() user: RequestUser) { return this.service.settings(user); }
   @Put("restaurant/deposits/settings") configure(@CurrentUser() user: RequestUser, @Body() body: unknown) { return this.service.saveSettings(user, body); }
   @Post("restaurant/deposits/:depositId/confirm-reservation") async confirmReservation(@CurrentUser() user: RequestUser, @Param("depositId") id: string) {
@@ -38,13 +39,25 @@ export class DepositsController {
   }
   @Post("restaurant/deposits/:depositId/send-confirmation") deliver(@CurrentUser() user: RequestUser, @Param("depositId") id: string) { return this.service.deliver(user, id); }
   @Get("restaurant/deposits/:depositId/delivery") delivery(@CurrentUser() user: RequestUser, @Param("depositId") id: string) { return this.service.deliveryState(user, id); }
+  @Get("restaurant/deposits/:depositId/proofs") proofs(@CurrentUser() user: RequestUser, @Param("depositId") id: string, @Query("page") page?: string, @Query("review") review?: string) {
+    return this.service.proofs(user, id, pageNumber.parse(page) ?? 1, proofReview.optional().parse(review));
+  }
+  @Get("restaurant/deposits/:depositId/movements") movements(@CurrentUser() user: RequestUser, @Param("depositId") id: string, @Query("page") page?: string) {
+    return this.service.movements(user, id, pageNumber.parse(page) ?? 1);
+  }
   @Post("restaurant/deposits/proofs/:proofId/reject") reject(@CurrentUser() user: RequestUser, @Param("proofId") id: string, @Body() body: unknown) { return this.service.rejectProof(user, id, z.object({ reason: z.string().trim().min(1).max(2000) }).parse(body).reason); }
   @Post("restaurant/deposits/:depositId/upload") internalUpload(@CurrentUser() user: RequestUser, @Param("depositId") id: string, @Body() body: unknown) { return this.service.internalUpload(user, id, uploadSchema.extend({ content: z.string().max(15 * 1024 * 1024) }).parse(body)); }
   @Get("restaurant/deposits/drive/status") driveStatus(@CurrentUser() user: RequestUser) { return this.drive.status(user); }
   @Post("restaurant/deposits/drive/connect") connect(@CurrentUser() user: RequestUser) { return this.drive.connect(user); }
   @Get("restaurant/deposits/drive/folders") folders(@CurrentUser() user: RequestUser, @Query("pageToken") pageToken?: string) { return this.drive.folders(user, pageToken); }
   @Post("restaurant/deposits/drive/folders") setupFolders(@CurrentUser() user: RequestUser, @Body() body: unknown) { return this.drive.setup(user, z.object({ rootFolderId: z.string().min(1).max(200).optional() }).parse(body).rootFolderId); }
-  @Get("restaurant/deposits/drive/files") files(@CurrentUser() user: RequestUser, @Query("category") category?: string, @Query("pageToken") pageToken?: string) { return this.drive.files(user, category, pageToken); }
+  @Get("restaurant/deposits/drive/files") files(@CurrentUser() user: RequestUser, @Query() query: Record<string, string>) {
+    const { category, pageToken, page, search } = z.object({
+      category: z.enum(["proofs", "general"]).optional(), pageToken: z.string().min(1).max(2048).optional(),
+      page: pageNumber, search: z.string().trim().max(120).optional()
+    }).parse(query);
+    return this.drive.files(user, category, pageToken, page, search);
+  }
   @Post("restaurant/deposits/proofs/:proofId/sync-drive") sync(@CurrentUser() user: RequestUser, @Param("proofId") id: string) { return this.drive.sync(user, id); }
   @Public()
   @Get("external/deposits/drive/callback")
@@ -109,6 +122,8 @@ export class DepositsController {
       search: z.string().trim().max(120).optional(),
       review: proofReview.optional(),
       payment: z.enum(["PENDING", "CONFIRMED"]).optional(),
+      phone: z.string().max(40).refine(value => value.replace(/\D/g, "").length >= 7).optional(),
+      orderIds: z.string().max(1010).transform(value => value.split(",")).pipe(z.array(z.string().min(1).max(100)).max(10)).optional(),
       from: z.string().datetime().optional(),
       before: z.string().datetime().optional()
     }).parse(query);

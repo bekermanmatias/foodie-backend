@@ -175,7 +175,7 @@ export class GiftCardsService {
   async listOrders(user: RequestUser, query: OrderListQuery = {}) {
     const restaurantId = await this.giftCardStaff(user, "ver las Gift Cards");
     const page = Math.max(1, Number.parseInt(query.page || "1", 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, Number.parseInt(query.pageSize || "10", 10) || 10));
+    const pageSize = Math.min(10, Math.max(1, Number.parseInt(query.pageSize || "10", 10) || 10));
     const search = query.search?.trim();
     const branch = await this.prisma.branch.findFirst({ where: { restaurantId }, orderBy: { createdAt: "asc" }, select: { timezone: true } });
     const timezone = branch?.timezone || "America/Argentina/Buenos_Aires";
@@ -192,7 +192,7 @@ export class GiftCardsService {
     };
     const [total, orders] = await Promise.all([
       this.prisma.giftCardOrder.count({ where }),
-      this.prisma.giftCardOrder.findMany({ where, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "desc" }, skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.giftCardOrder.findMany({ where, include: { product: true, giftCards: { orderBy: { createdAt: "asc" } } }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: (page - 1) * pageSize, take: pageSize }),
     ]);
     return { items: orders.map((order) => ({ id: order.id, purchaserName: order.purchaserName, purchaserPhone: order.purchaserPhone, recipientName: order.recipientName, message: order.message, type: order.type, partySize: order.partySize, quantity: order.quantity, unitAmount: money(order.unitAmount), amount: money(order.amount), currency: order.currency, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus, status: order.status, paymentReference: order.paymentReference, paymentConfirmedAt: order.paymentConfirmedAt, sentAt: order.sentAt, createdAt: order.createdAt, product: order.product ? this.productView(order.product) : null, giftCards: order.giftCards.map((card) => this.giftCardView(card)), giftCard: order.quantity === 1 && order.giftCards[0] ? this.giftCardView(order.giftCards[0]) : null })), total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }

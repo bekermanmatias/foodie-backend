@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 import type { RequestUser } from "../../common/auth/request-user";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { restaurantWebhook } from "../../common/restaurant-webhooks";
 import { encryptSecret, decryptSecret } from "../../common/security/encrypted-secret";
 import { restaurantFeatures, requireExternalAccess, requireFeature } from "../../common/restaurant-features";
@@ -9,6 +9,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { depositActor } from "./deposit-access";
 import { normalizeDepositPhone } from "./deposit-rules";
 import { MAX_PROOF_BYTES, ProofStorageService, verifyProofContent } from "./proof-storage.service";
+import { DEPOSIT_PAGE_SIZE, depositPage, depositPageArgs } from "./deposit-pagination";
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
 const giftOrderSelect = {
@@ -24,6 +25,8 @@ type GiftProofFilters = {
   payment?: "PENDING" | "CONFIRMED";
   from?: string;
   before?: string;
+  phone?: string;
+  orderIds?: string[];
 };
 
 const giftProofReview: Record<NonNullable<GiftProofFilters["review"]>, Prisma.GiftCardOrderWhereInput> = {
@@ -32,9 +35,12 @@ const giftProofReview: Record<NonNullable<GiftProofFilters["review"]>, Prisma.Gi
   rejected: { paymentStatus: "REJECTED" }
 };
 
+function driveQuote(text: string) {
+  return `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
 function driveProperty(key: string, value: string) {
-  const quote = (text: string) => `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  return `appProperties has { key=${quote(key)} and value=${quote(value)} }`;
+  return `appProperties has { key=${driveQuote(key)} and value=${driveQuote(value)} }`;
 }
 
 function giftProofOrder({ giftCards, quantity, restaurant, restaurantId, ...order }: Prisma.GiftCardOrderGetPayload<{ select: typeof giftOrderSelect }>) {
@@ -153,13 +159,32 @@ export class DepositDriveService {
     await this.prisma.restaurantDriveConnection.upsert({ where: { restaurantId }, create: { restaurantId, ...data }, update: data });
     return this.status(user);
   }
-  async files(user: RequestUser, category = "proofs", pageToken?: string) {
+  async files(user: RequestUser, category = "proofs", pageToken?: string, page?: number, search?: string) {
     const restaurantId = await depositActor(this.prisma, user);
-    if (category === "proofs") return this.prisma.depositProof.findMany({ where: { restaurantId }, include: { request: { include: { deposit: { include: { reservation: true } } } } }, orderBy: { receivedAt: "desc" }, take: 200 });
+    if (category === "proofs") {
+      const rows = await this.prisma.depositProof.findMany({
+        where: { restaurantId, ...(search ? { OR: [
+          { originalName: { contains: search, mode: "insensitive" } },
+          { request: { deposit: { reservation: { code: { contains: search, mode: "insensitive" } } } } },
+          { request: { deposit: { reservation: { fullName: { contains: search, mode: "insensitive" } } } } }
+        ] } : {}) },
+        select: { id: true, originalName: true, receivedAt: true, driveStatus: true, driveFileUrl: true, request: {
+          select: { deposit: { select: { reservation: { select: { code: true, fullName: true } } } } }
+        } },
+        orderBy: [{ receivedAt: "desc" }, { id: "desc" }], ...depositPageArgs(page ?? 1)
+      });
+      const result = depositPage(rows);
+      return page === undefined ? result.items : result;
+    }
     const row = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId } });
     if ((await restaurantFeatures(this.prisma, restaurantId)).isDemo) return { files: [] };
     if (!row?.generalFolderId) throw new ConflictException("Configurá la carpeta de archivos generales");
-    return this.api(restaurantId, `drive/v3/files?${new URLSearchParams({ q: `'${row.generalFolderId.replace(/'/g, "\\'")}' in parents and trashed=false`, fields: "files(id,name,webViewLink,mimeType),nextPageToken", pageSize: "100", ...(pageToken ? { pageToken } : {}) })}`);
+    const conditions = [`${driveQuote(row.generalFolderId)} in parents`, "trashed=false"];
+    if (search) conditions.push(`name contains ${driveQuote(search)}`);
+    return this.api(restaurantId, `drive/v3/files?${new URLSearchParams({
+      q: conditions.join(" and "), fields: "files(id,name,webViewLink,mimeType),nextPageToken",
+      orderBy: "createdTime desc", pageSize: String(DEPOSIT_PAGE_SIZE), ...(pageToken ? { pageToken } : {})
+    })}`);
   }
   async sync(user: RequestUser, proofId: string) {
     return this.syncForRestaurant(await depositActor(this.prisma, user), proofId);
@@ -172,53 +197,35 @@ export class DepositDriveService {
     return user.restaurantId;
   }
   async listGiftCardProofs(user: RequestUser, phone?: string, orderIds?: string[]) {
-    const restaurantId = await this.giftProofOwner(user);
-    const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId }, select: { status: true, encryptedRefreshToken: true } });
-    if (!connection?.encryptedRefreshToken || (await restaurantFeatures(this.prisma, restaurantId)).isDemo) return [];
-    const normalized = phone ? normalizeDepositPhone(phone) : null;
-    const contactOrders = normalized ? await this.prisma.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "GiftCardOrder" WHERE "restaurantId" = ${restaurantId}
-      AND regexp_replace("purchaserPhone", '[^0-9]', '', 'g') = ${normalized}
-      ORDER BY "createdAt" DESC LIMIT 50` : null;
-    const ids = contactOrders?.map(({ id }) => id) ?? orderIds;
-    const orders = await this.prisma.giftCardOrder.findMany({
-      where: { restaurantId, ...(ids ? { id: { in: ids } } : { status: "PENDING_PAYMENT", paymentStatus: "PENDING" }) },
-      orderBy: { createdAt: "desc" }, take: 50,
-      select: giftOrderSelect
+    const result = await this.giftCardProofHistory(user, undefined, {
+      phone, orderIds, review: phone || orderIds ? undefined : "pending"
     });
-    if (!orders.length) return [];
-    const files: DriveProof[] = [];
-    for (let start = 0; start < orders.length; start += 20) {
-      const orderFilter = orders.slice(start, start + 20).map(order => driveProperty("foodieGiftCardOrderId", order.id)).join(" or ");
-      const query = new URLSearchParams({
-        q: `trashed=false and ${driveProperty("restaurantId", restaurantId)} and (${orderFilter})`,
-        fields: "files(id,name,mimeType,createdTime,appProperties)", orderBy: "createdTime desc", pageSize: "100"
-      });
-      const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[] };
-      files.push(...(result.files ?? []));
-    }
-    const byOrder = new Map(orders.map(order => [order.id, giftProofOrder(order)]));
-    return files.sort((a, b) => b.createdTime.localeCompare(a.createdTime)).flatMap(({ appProperties, ...file }) => {
-      const order = byOrder.get(appProperties?.foodieGiftCardOrderId ?? "");
-      if (!order || appProperties?.restaurantId !== restaurantId) return [];
-      return [{ ...file, order }];
-    });
+    return result.items;
   }
   async giftCardProofHistory(user: RequestUser, pageToken?: string, filters: GiftProofFilters = {}) {
     const restaurantId = await this.giftProofOwner(user);
     const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId }, select: { encryptedRefreshToken: true } });
     if (!connection?.encryptedRefreshToken || (await restaurantFeatures(this.prisma, restaurantId)).isDemo) return { items: [], nextPageToken: null };
     const conditions = ["trashed=false", driveProperty("restaurantId", restaurantId)];
+    if (filters.orderIds?.length) conditions.push(`(${filters.orderIds.map(id => driveProperty("foodieGiftCardOrderId", id)).join(" or ")})`);
     if (filters.from) conditions.push(`createdTime >= '${filters.from}'`);
     if (filters.before) conditions.push(`createdTime < '${filters.before}'`);
     const query = new URLSearchParams({
       q: conditions.join(" and "),
       fields: "nextPageToken,files(id,name,mimeType,createdTime,appProperties)",
-      orderBy: "createdTime desc", pageSize: "100", ...(pageToken ? { pageToken } : {})
+      orderBy: "createdTime desc", pageSize: String(DEPOSIT_PAGE_SIZE), ...(pageToken ? { pageToken } : {})
     });
     const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[]; nextPageToken?: string };
     const files = (result.files ?? []).filter(file => file.appProperties?.restaurantId === restaurantId && file.appProperties.foodieGiftCardOrderId);
-    const ids = [...new Set(files.map(file => file.appProperties!.foodieGiftCardOrderId))];
+    let ids = [...new Set(files.map(file => file.appProperties!.foodieGiftCardOrderId))];
+    if (filters.phone && ids.length) {
+      const matches = await this.prisma.$queryRaw<{ id: string }[]>`
+        SELECT id FROM "GiftCardOrder" WHERE "restaurantId" = ${restaurantId}
+        AND id IN (${Prisma.join(ids)})
+        AND regexp_replace("purchaserPhone", '[^0-9]', '', 'g') = ${normalizeDepositPhone(filters.phone)}
+      `;
+      ids = matches.map(({ id }) => id);
+    }
     const orders = ids.length ? await this.prisma.giftCardOrder.findMany({
       where: {
         restaurantId, id: { in: ids },
