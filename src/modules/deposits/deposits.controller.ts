@@ -93,6 +93,22 @@ export class DepositsController {
     }).parse(body);
     return this.drive.saveGiftCardProof(token, { ...input, orderId });
   }
+  @Get("restaurant/gift-cards/proofs")
+  listGiftCardProofs(@CurrentUser() user: RequestUser, @Query("phone") phone?: string, @Query("orderIds") orderIds?: string) {
+    const input = z.object({
+      phone: z.string().max(40).refine(value => value.replace(/\D/g, "").length >= 7).optional(),
+      orderIds: z.array(z.string().min(1).max(100)).max(50).optional()
+    }).parse({ phone, orderIds: orderIds === undefined ? undefined : orderIds.split(",") });
+    return this.drive.listGiftCardProofs(user, input.phone, input.orderIds);
+  }
+  @Get("restaurant/gift-cards/orders/:orderId/proofs/:fileId")
+  async giftCardProofFile(@CurrentUser() user: RequestUser, @Param("orderId") orderId: string, @Param("fileId") fileId: string, @Res() response: Response) {
+    const file = await this.drive.giftCardProofFile(user, orderId, fileId);
+    response.setHeader("Content-Type", file.mimeType);
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.send(file.data);
+  }
   private async resolveIntegrationToken(apiKey: string) {
     const token = await this.prisma.integrationToken.findFirst({
       where: { tokenHash: hashOpaqueToken(apiKey), isActive: true }, select: { id: true, restaurantId: true }

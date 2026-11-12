@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 import type { RequestUser } from "../../common/auth/request-user";
 import { encryptSecret, decryptSecret } from "../../common/security/encrypted-secret";
@@ -6,7 +6,7 @@ import { restaurantFeatures, requireExternalAccess, requireFeature } from "../..
 import { PrismaService } from "../prisma/prisma.service";
 import { depositActor } from "./deposit-access";
 import { normalizeDepositPhone } from "./deposit-rules";
-import { ProofStorageService, verifyProofContent } from "./proof-storage.service";
+import { MAX_PROOF_BYTES, ProofStorageService, verifyProofContent } from "./proof-storage.service";
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
 
@@ -61,6 +61,10 @@ export class DepositDriveService {
     return { connected: true };
   }
   private async api(restaurantId: string, suffix: string, init: RequestInit = {}, allowMissing = false) {
+    const response = await this.driveResponse(restaurantId, suffix, init, allowMissing);
+    return response ? response.json() as Promise<any> : null;
+  }
+  private async driveResponse(restaurantId: string, suffix: string, init: RequestInit = {}, allowMissing = false) {
     await requireExternalAccess(this.prisma, restaurantId);
     const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId } });
     if (!connection?.encryptedRefreshToken) throw new ConflictException("Conectá Google Drive primero");
@@ -73,7 +77,7 @@ export class DepositDriveService {
     const result = await fetch(`https://www.googleapis.com/${suffix}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token.access_token}` }, signal: AbortSignal.timeout(30000) });
     if (allowMissing && result.status === 404) return null;
     if (!result.ok) throw new ServiceUnavailableException(result.status === 403 ? "Google no permite acceder a esta carpeta o archivo" : `Drive no está disponible (${result.status}); podés reintentar`);
-    return result.json() as Promise<any>;
+    return result;
   }
   async folders(user: RequestUser, pageToken?: string) {
     const restaurantId = await depositActor(this.prisma, user, true);
@@ -112,6 +116,65 @@ export class DepositDriveService {
   }
   async sync(user: RequestUser, proofId: string) {
     return this.syncForRestaurant(await depositActor(this.prisma, user), proofId);
+  }
+  private async giftProofOwner(user: RequestUser) {
+    if (user.scope !== "restaurant" || user.role !== "restaurant_owner" || !user.restaurantId) {
+      throw new ForbiddenException("Solo el dueño puede revisar pagos de Gift Cards");
+    }
+    await requireFeature(this.prisma, user.restaurantId, "giftCards");
+    return user.restaurantId;
+  }
+  async listGiftCardProofs(user: RequestUser, phone?: string, orderIds?: string[]) {
+    const restaurantId = await this.giftProofOwner(user);
+    const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId }, select: { status: true, encryptedRefreshToken: true } });
+    if (!connection?.encryptedRefreshToken || (await restaurantFeatures(this.prisma, restaurantId)).isDemo) return [];
+    const normalized = phone ? normalizeDepositPhone(phone) : null;
+    const contactOrders = normalized ? await this.prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "GiftCardOrder" WHERE "restaurantId" = ${restaurantId}
+      AND regexp_replace("purchaserPhone", '[^0-9]', '', 'g') = ${normalized}
+      ORDER BY "createdAt" DESC LIMIT 50` : null;
+    const ids = contactOrders?.map(({ id }) => id) ?? orderIds;
+    const orders = await this.prisma.giftCardOrder.findMany({
+      where: { restaurantId, ...(ids ? { id: { in: ids } } : { status: "PENDING_PAYMENT", paymentStatus: "PENDING" }) },
+      orderBy: { createdAt: "desc" }, take: 50,
+      select: { id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, product: { select: { name: true } } }
+    });
+    if (!orders.length) return [];
+    const literal = (value: string) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+    const property = (key: string, value: string) => `appProperties has { key=${literal(key)} and value=${literal(value)} }`;
+    type DriveProof = { id: string; name: string; mimeType: string; createdTime: string; appProperties?: Record<string, string> };
+    const files: DriveProof[] = [];
+    for (let start = 0; start < orders.length; start += 20) {
+      const orderFilter = orders.slice(start, start + 20).map(order => property("foodieGiftCardOrderId", order.id)).join(" or ");
+      const query = new URLSearchParams({
+        q: `trashed=false and ${property("restaurantId", restaurantId)} and (${orderFilter})`,
+        fields: "files(id,name,mimeType,createdTime,appProperties)", orderBy: "createdTime desc", pageSize: "100"
+      });
+      const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[] };
+      files.push(...(result.files ?? []));
+    }
+    const byOrder = new Map(orders.map(order => [order.id, order]));
+    return files.sort((a, b) => b.createdTime.localeCompare(a.createdTime)).flatMap(({ appProperties, ...file }) => {
+      const order = byOrder.get(appProperties?.foodieGiftCardOrderId ?? "");
+      if (!order || appProperties?.restaurantId !== restaurantId) return [];
+      return [{ ...file, order }];
+    });
+  }
+  async giftCardProofFile(user: RequestUser, orderId: string, fileId: string) {
+    const restaurantId = await this.giftProofOwner(user);
+    const order = await this.prisma.giftCardOrder.findFirst({ where: { restaurantId, id: orderId }, select: { id: true } });
+    if (!order) throw new NotFoundException("Compra de Gift Card no encontrada");
+    const path = `drive/v3/files/${encodeURIComponent(fileId)}`;
+    const file = await this.api(restaurantId, `${path}?fields=mimeType,size,trashed,appProperties`, {}, true);
+    if (!file || file.trashed || file.appProperties?.restaurantId !== restaurantId || file.appProperties?.foodieGiftCardOrderId !== order.id) {
+      throw new NotFoundException("Comprobante no encontrado para esta compra");
+    }
+    if (Number(file.size) > MAX_PROOF_BYTES) throw new BadRequestException("El comprobante supera el tamaño permitido");
+    const response = await this.driveResponse(restaurantId, `${path}?alt=media`);
+    if (!response) throw new NotFoundException("Comprobante no encontrado");
+    const data = Buffer.from(await response.arrayBuffer());
+    verifyProofContent(data, file.mimeType);
+    return { data, mimeType: file.mimeType as string };
   }
   private uploadProof(restaurantId: string, metadata: { id: string; name: string; parents: string[]; appProperties: Record<string, string> }, data: Buffer, mimeType: string) {
     const boundary = randomBytes(16).toString("hex");
