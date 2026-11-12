@@ -9,6 +9,13 @@ import { normalizeDepositPhone } from "./deposit-rules";
 import { MAX_PROOF_BYTES, ProofStorageService, verifyProofContent } from "./proof-storage.service";
 
 const DRIVE_TOKEN_PREFIX = "drive-v1:";
+const giftOrderSelect = { id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, product: { select: { name: true } } } as const;
+type DriveProof = { id: string; name: string; mimeType: string; createdTime: string; appProperties?: Record<string, string> };
+
+function driveProperty(key: string, value: string) {
+  const quote = (text: string) => `'${text.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  return `appProperties has { key=${quote(key)} and value=${quote(value)} }`;
+}
 
 @Injectable()
 export class DepositDriveService {
@@ -137,17 +144,14 @@ export class DepositDriveService {
     const orders = await this.prisma.giftCardOrder.findMany({
       where: { restaurantId, ...(ids ? { id: { in: ids } } : { status: "PENDING_PAYMENT", paymentStatus: "PENDING" }) },
       orderBy: { createdAt: "desc" }, take: 50,
-      select: { id: true, purchaserName: true, amount: true, currency: true, status: true, paymentStatus: true, product: { select: { name: true } } }
+      select: giftOrderSelect
     });
     if (!orders.length) return [];
-    const literal = (value: string) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-    const property = (key: string, value: string) => `appProperties has { key=${literal(key)} and value=${literal(value)} }`;
-    type DriveProof = { id: string; name: string; mimeType: string; createdTime: string; appProperties?: Record<string, string> };
     const files: DriveProof[] = [];
     for (let start = 0; start < orders.length; start += 20) {
-      const orderFilter = orders.slice(start, start + 20).map(order => property("foodieGiftCardOrderId", order.id)).join(" or ");
+      const orderFilter = orders.slice(start, start + 20).map(order => driveProperty("foodieGiftCardOrderId", order.id)).join(" or ");
       const query = new URLSearchParams({
-        q: `trashed=false and ${property("restaurantId", restaurantId)} and (${orderFilter})`,
+        q: `trashed=false and ${driveProperty("restaurantId", restaurantId)} and (${orderFilter})`,
         fields: "files(id,name,mimeType,createdTime,appProperties)", orderBy: "createdTime desc", pageSize: "100"
       });
       const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[] };
@@ -159,6 +163,28 @@ export class DepositDriveService {
       if (!order || appProperties?.restaurantId !== restaurantId) return [];
       return [{ ...file, order }];
     });
+  }
+  async giftCardProofHistory(user: RequestUser, pageToken?: string) {
+    const restaurantId = await this.giftProofOwner(user);
+    const connection = await this.prisma.restaurantDriveConnection.findUnique({ where: { restaurantId }, select: { encryptedRefreshToken: true } });
+    if (!connection?.encryptedRefreshToken || (await restaurantFeatures(this.prisma, restaurantId)).isDemo) return { items: [], nextPageToken: null };
+    const query = new URLSearchParams({
+      q: `trashed=false and ${driveProperty("restaurantId", restaurantId)}`,
+      fields: "nextPageToken,files(id,name,mimeType,createdTime,appProperties)",
+      orderBy: "createdTime desc", pageSize: "100", ...(pageToken ? { pageToken } : {})
+    });
+    const result = await this.api(restaurantId, `drive/v3/files?${query}`) as { files?: DriveProof[]; nextPageToken?: string };
+    const files = (result.files ?? []).filter(file => file.appProperties?.restaurantId === restaurantId && file.appProperties.foodieGiftCardOrderId);
+    const ids = [...new Set(files.map(file => file.appProperties!.foodieGiftCardOrderId))];
+    const orders = ids.length ? await this.prisma.giftCardOrder.findMany({
+      where: { restaurantId, id: { in: ids } }, select: giftOrderSelect
+    }) : [];
+    const byOrder = new Map(orders.map(order => [order.id, order]));
+    const items = files.flatMap(({ appProperties, ...file }) => {
+      const order = byOrder.get(appProperties!.foodieGiftCardOrderId);
+      return order ? [{ ...file, order }] : [];
+    });
+    return { items, nextPageToken: result.nextPageToken ?? null };
   }
   async giftCardProofFile(user: RequestUser, orderId: string, fileId: string) {
     const restaurantId = await this.giftProofOwner(user);

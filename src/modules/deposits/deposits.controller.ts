@@ -101,6 +101,10 @@ export class DepositsController {
     }).parse({ phone, orderIds: orderIds === undefined ? undefined : orderIds.split(",") });
     return this.drive.listGiftCardProofs(user, input.phone, input.orderIds);
   }
+  @Get("restaurant/gift-cards/proofs/history")
+  giftCardProofHistory(@CurrentUser() user: RequestUser, @Query("pageToken") pageToken?: string) {
+    return this.drive.giftCardProofHistory(user, z.string().min(1).max(2048).optional().parse(pageToken));
+  }
   @Get("restaurant/gift-cards/orders/:orderId/proofs/:fileId")
   async giftCardProofFile(@CurrentUser() user: RequestUser, @Param("orderId") orderId: string, @Param("fileId") fileId: string, @Res() response: Response) {
     const file = await this.drive.giftCardProofFile(user, orderId, fileId);
